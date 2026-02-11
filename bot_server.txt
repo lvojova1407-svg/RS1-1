@@ -1,6 +1,6 @@
 """
-🤖 Telegram Bot для записи на перерывы - РАБОЧАЯ ВЕРСИЯ 24/7
-🚀 Авто-пинг, SQLite база, кнопки: ЗАПИСАТЬСЯ / МОИ ЗАПИСИ / ВСЕ БРОНИРОВАНИЯ / СТАТИСТИКА
+🤖 Telegram Bot для записи на перерывы - СТАТИЧНОЕ МЕНЮ
+🚀 10-минутные слоты, лимит 3 человека, никнеймы в расписании
 """
 import os
 import asyncio
@@ -9,21 +9,22 @@ import sqlite3
 import threading
 import time
 import requests
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 
 # FastAPI
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 import uvicorn
 
 # Telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application, 
     CommandHandler, 
-    CallbackQueryHandler, 
-    ContextTypes
+    ContextTypes,
+    MessageHandler,
+    filters
 )
 
 # ================== КОНФИГУРАЦИЯ ==================
@@ -45,8 +46,8 @@ logger = logging.getLogger(__name__)
 # FastAPI приложение
 app = FastAPI(
     title="Telegram Bot для записи на перерывы",
-    description="Бот для организации перерывов с авто-пингом",
-    version="4.0"
+    description="Бот для организации перерывов с 10-минутными слотами",
+    version="6.0"
 )
 
 # Глобальные переменные
@@ -84,6 +85,85 @@ def init_db():
     conn.close()
     logger.info("✅ База данных инициализирована")
 
+# ================== ФУНКЦИИ ДЛЯ 10-МИНУТНЫХ СЛОТОВ ==================
+def get_break_slots() -> List[str]:
+    """Возвращает список всех доступных таймслотов (10-минутные интервалы с 10:00 до 18:50)"""
+    slots = []
+    for hour in range(10, 19):
+        for minute in [0, 10, 20, 30, 40, 50]:
+            if hour == 18 and minute > 50:
+                continue
+            start = f"{hour:02d}:{minute:02d}"
+            end_minute = minute + 10
+            end_hour = hour
+            if end_minute >= 60:
+                end_hour = hour + 1
+                end_minute = end_minute - 60
+            end = f"{end_hour:02d}:{end_minute:02d}"
+            slots.append(f"{start}-{end}")
+    return slots
+
+def get_nearby_slots() -> List[str]:
+    """Возвращает слоты на ближайшие 2 часа от текущего времени (10-минутные интервалы)"""
+    moscow_tz = timezone(timedelta(hours=3))
+    now = datetime.now(moscow_tz)
+    current_hour = now.hour
+    current_minute = now.minute
+    
+    # Округляем до следующего 10-минутного интервала
+    remainder = current_minute % 10
+    if remainder == 0:
+        start_minute = current_minute + 10
+    else:
+        start_minute = current_minute - remainder + 10
+    
+    start_hour = current_hour
+    if start_minute >= 60:
+        start_hour += 1
+        start_minute -= 60
+    
+    nearby_slots = []
+    all_slots = get_break_slots()
+    
+    # Ищем слоты на ближайшие 2 часа
+    target_time = start_hour * 60 + start_minute
+    max_time = target_time + 120
+    
+    for slot in all_slots:
+        slot_start = slot.split('-')[0]
+        slot_hour = int(slot_start.split(':')[0])
+        slot_minute = int(slot_start.split(':')[1])
+        slot_time = slot_hour * 60 + slot_minute
+        
+        if target_time <= slot_time <= max_time:
+            nearby_slots.append(slot)
+            if len(nearby_slots) >= 8:
+                break
+    
+    return nearby_slots
+
+def get_slot_status(slot: str, break_date: str) -> str:
+    """Определяет статус слота: свободно, мало мест, занят (максимум 3 человека)"""
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    
+    slot_start = slot.split('-')[0]
+    
+    cursor.execute('''
+        SELECT COUNT(*) FROM breaks 
+        WHERE break_time = ? AND break_date = ?
+    ''', (slot_start, break_date))
+    
+    count = cursor.fetchone()[0]
+    conn.close()
+    
+    if count >= 3:
+        return "🔴 занят"
+    elif count >= 1:
+        return "🟡 мало мест"
+    else:
+        return "🟢 свободно"
+
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 def get_moscow_time() -> str:
     """Получить текущее время по Москве"""
@@ -93,11 +173,6 @@ def get_moscow_time() -> str:
 def get_current_date() -> str:
     """Получить текущую дату"""
     return datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d")
-
-def get_break_times() -> List[str]:
-    """Возвращает список доступных времен для перерывов"""
-    return ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30", 
-            "13:00", "13:30", "14:00", "14:30", "15:00", "15:30"]
 
 def save_user_to_db(user_id: int, username: str, first_name: str, last_name: str):
     """Сохраняет пользователя в базу данных"""
@@ -112,8 +187,8 @@ def save_user_to_db(user_id: int, username: str, first_name: str, last_name: str
     conn.commit()
     conn.close()
 
-def save_break_to_db(user_id: int, break_time: str, break_date: str):
-    """Сохраняет запись на перерыв"""
+def save_break_to_db(user_id: int, break_time: str, break_date: str) -> bool:
+    """Сохраняет запись на перерыв с проверкой лимита в 3 человека"""
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     
@@ -126,6 +201,18 @@ def save_break_to_db(user_id: int, break_time: str, break_date: str):
     count = cursor.fetchone()[0]
     
     if count > 0:
+        conn.close()
+        return False
+    
+    # Проверяем количество записей на этот слот (максимум 3)
+    cursor.execute('''
+        SELECT COUNT(*) FROM breaks 
+        WHERE break_time = ? AND break_date = ?
+    ''', (break_time, break_date))
+    
+    slot_count = cursor.fetchone()[0]
+    
+    if slot_count >= 3:
         conn.close()
         return False
     
@@ -154,12 +241,12 @@ def get_user_breaks(user_id: int, break_date: str) -> List[str]:
     return breaks
 
 def get_all_breaks(break_date: str) -> Dict[str, List[str]]:
-    """Получает все записи на перерывы"""
+    """Получает все записи на перерывы с никнеймами (first_name)"""
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     
     cursor.execute('''
-        SELECT u.username, b.break_time 
+        SELECT u.first_name, b.break_time 
         FROM breaks b
         JOIN users u ON b.user_id = u.user_id
         WHERE b.break_date = ?
@@ -167,34 +254,30 @@ def get_all_breaks(break_date: str) -> Dict[str, List[str]]:
     ''', (break_date,))
     
     breaks = {}
-    for username, break_time in cursor.fetchall():
+    for first_name, break_time in cursor.fetchall():
         if break_time not in breaks:
             breaks[break_time] = []
-        breaks[break_time].append(username or "Аноним")
+        name = first_name if first_name else "Аноним"
+        breaks[break_time].append(name)
     
     conn.close()
     return breaks
 
-# ================== НОВАЯ ФУНКЦИЯ СТАТИСТИКИ ==================
 def get_statistics() -> Dict:
     """Получает статистику по записям"""
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     
-    # Общее количество пользователей
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
     
-    # Общее количество записей
     cursor.execute("SELECT COUNT(*) FROM breaks")
     total_breaks = cursor.fetchone()[0]
     
-    # Записи на сегодня
     current_date = get_current_date()
     cursor.execute("SELECT COUNT(*) FROM breaks WHERE break_date = ?", (current_date,))
     today_breaks = cursor.fetchone()[0]
     
-    # Самые популярные времена
     cursor.execute('''
         SELECT break_time, COUNT(*) as count 
         FROM breaks 
@@ -204,7 +287,6 @@ def get_statistics() -> Dict:
     ''')
     popular_times = cursor.fetchall()
     
-    # Активные пользователи (кто записывался сегодня)
     cursor.execute('''
         SELECT COUNT(DISTINCT user_id) 
         FROM breaks 
@@ -224,13 +306,11 @@ def get_statistics() -> Dict:
 
 # ================== КОМАНДЫ БОТА ==================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start с новыми кнопками"""
+    """Обработчик команды /start"""
     user = update.effective_user
-    chat_id = update.effective_chat.id
     
     logger.info(f"🚀 /start от {user.id}")
     
-    # Сохраняем пользователя
     save_user_to_db(
         user_id=user.id,
         username=user.username,
@@ -243,47 +323,294 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 Бот для записи на перерывы\n"
         f"📅 Сегодня: {get_current_date()}\n"
         f"⏰ Время: {get_moscow_time()}\n\n"
-        f"⬇️ Выберите действие:"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Используйте меню внизу экрана:\n\n"
+        f"📝 /breaks - Записаться на перерыв\n"
+        f"📋 /mybreaks - Мои записи\n"
+        f"👥 /allbreaks - Расписание\n"
+        f"📊 /stats - Статистика\n"
+        f"❓ /help - Помощь\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     
-    # НОВЫЕ КНОПКИ - 2x2 как на скриншоте
-    keyboard = [
-        [
-            InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks"),
-            InlineKeyboardButton("📋 МОИ ЗАПИСИ", callback_data="my_breaks")
-        ],
-        [
-            InlineKeyboardButton("👥 ВСЕ БРОНИРОВАНИЯ", callback_data="today_schedule"),
-            InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="show_stats")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=welcome_text,
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text(welcome_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
-        "🤖 Помощь по боту\n\n"
-        "Основные команды:\n"
-        "/start - Начало работы\n"
-        "/breaks - Записаться на перерыв\n"
-        "/my_breaks - Мои записи\n"
-        "/today - Расписание на сегодня\n"
-        "/stats - Статистика\n"
-        "/help - Эта справка\n\n"
-        "Как записаться:\n"
-        "1. Нажмите 'ЗАПИСАТЬСЯ'\n"
-        "2. Выберите удобное время\n"
-        "3. Подтвердите запись\n\n"
-        "Бот работает круглосуточно!"
+        f"🤖 ПОМОЩЬ ПО БОТУ\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📌 Доступные команды:\n\n"
+        f"🏠 /start - Главное меню\n"
+        f"📝 /breaks - Записаться на перерыв\n"
+        f"📋 /mybreaks - Мои записи\n"
+        f"👥 /allbreaks - Расписание\n"
+        f"📊 /stats - Статистика бота\n"
+        f"❓ /help - Эта справка\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ Таймслоты: 10 минут\n"
+        f"👥 Лимит: 3 человека на слот\n\n"
+        f"✅ Как записаться:\n"
+        f"1. Нажмите /breaks\n"
+        f"2. Выберите слот из списка\n"
+        f"3. Отправьте время начала (ЧЧ:ММ)\n\n"
+        f"📌 Пример: 14:30"
     )
     
     await update.message.reply_text(help_text)
+
+async def breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для записи на перерыв с 10-минутными слотами"""
+    user_id = update.effective_user.id
+    current_date = get_current_date()
+    moscow_time = get_moscow_time()
+    user_breaks = get_user_breaks(user_id, current_date)
+    
+    # Получаем слоты на ближайшие 2 часа
+    nearby_slots = get_nearby_slots()
+    
+    text = (
+        f"🎯 ВЫБОР ВРЕМЕНИ ДЛЯ ПЕРЕРЫВА\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🕐 Текущее время (Москва): {moscow_time}\n"
+        f"📅 Дата: {current_date}\n"
+        f"⏳ Доступные слоты на ближайшие 2 часа\n\n"
+        f"📊 Статус слотов:\n"
+        f"🟢 - свободно\n"
+        f"🟡 - мало мест (1-2 чел.)\n"
+        f"🔴 - занят (3 чел.)\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🗓️ ВЫБЕРИТЕ УДОБНОЕ ВРЕМЯ:\n\n"
+    )
+    
+    # Разбиваем слоты на 2 колонки
+    for i in range(0, len(nearby_slots), 2):
+        if i + 1 < len(nearby_slots):
+            slot1 = nearby_slots[i]
+            slot2 = nearby_slots[i + 1]
+            
+            status1 = get_slot_status(slot1, current_date)
+            status2 = get_slot_status(slot2, current_date)
+            
+            slot1_start = slot1.split('-')[0]
+            slot2_start = slot2.split('-')[0]
+            
+            if slot1_start in user_breaks:
+                slot1_display = f"✅ {slot1} (вы)"
+            else:
+                slot1_display = f"{status1} {slot1}"
+                
+            if slot2_start in user_breaks:
+                slot2_display = f"✅ {slot2} (вы)"
+            else:
+                slot2_display = f"{status2} {slot2}"
+            
+            text += f"{slot1_display:<35} {slot2_display:<35}\n"
+        else:
+            slot1 = nearby_slots[i]
+            status1 = get_slot_status(slot1, current_date)
+            slot1_start = slot1.split('-')[0]
+            
+            if slot1_start in user_breaks:
+                slot1_display = f"✅ {slot1} (вы)"
+            else:
+                slot1_display = f"{status1} {slot1}"
+            
+            text += f"{slot1_display:<35}\n"
+        
+        text += "\n"
+    
+    text += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✏️ Чтобы записаться, отправьте время начала слота\n"
+        f"   в формате ЧЧ:ММ (например: 14:30)\n\n"
+        f"🔄 /breaks - Обновить слоты\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    
+    await update.message.reply_text(text)
+
+async def process_break_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений с временем"""
+    user_id = update.effective_user.id
+    message_text = update.message.text.strip()
+    current_date = get_current_date()
+    
+    time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
+    
+    if re.match(time_pattern, message_text):
+        if len(message_text) == 4:
+            message_text = f"0{message_text}"
+        
+        valid_times = [slot.split('-')[0] for slot in get_break_slots()]
+        
+        if message_text in valid_times:
+            success = save_break_to_db(user_id, message_text, current_date)
+            
+            if success:
+                full_slot = None
+                for slot in get_break_slots():
+                    if slot.startswith(message_text):
+                        full_slot = slot
+                        break
+                
+                conn = sqlite3.connect(DATABASE_URL)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM breaks 
+                    WHERE break_time = ? AND break_date = ?
+                ''', (message_text, current_date))
+                current_count = cursor.fetchone()[0]
+                conn.close()
+                
+                response = (
+                    f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🕐 Слот: {full_slot or message_text}\n"
+                    f"📅 Дата: {current_date}\n"
+                    f"👥 Мест занято: {current_count}/3\n\n"
+                    f"Вы успешно записаны на перерыв!\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📋 /mybreaks - Мои записи\n"
+                    f"👥 /allbreaks - Расписание\n"
+                    f"🔄 /breaks - Обновить слоты"
+                )
+                logger.info(f"✅ Запись сохранена: user={user_id}, time={message_text}, count={current_count}/3")
+            else:
+                conn = sqlite3.connect(DATABASE_URL)
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    SELECT COUNT(*) FROM breaks 
+                    WHERE user_id = ? AND break_date = ? AND break_time = ?
+                ''', (user_id, current_date, message_text))
+                already_registered = cursor.fetchone()[0] > 0
+                
+                cursor.execute('''
+                    SELECT COUNT(*) FROM breaks 
+                    WHERE break_time = ? AND break_date = ?
+                ''', (message_text, current_date))
+                slot_full = cursor.fetchone()[0] >= 3
+                
+                conn.close()
+                
+                if already_registered:
+                    response = (
+                        f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"❌ Вы уже записаны на этот слот!\n\n"
+                        f"📋 /mybreaks - Мои записи\n"
+                        f"🔄 /breaks - Выбрать другое время"
+                    )
+                elif slot_full:
+                    response = (
+                        f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"❌ Этот слот уже полностью занят (3/3)!\n\n"
+                        f"🔄 /breaks - Выбрать другое время"
+                    )
+                else:
+                    response = (
+                        f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"❌ Не удалось создать запись\n\n"
+                        f"🔄 /breaks - Попробовать снова"
+                    )
+                
+                logger.info(f"⚠️ Запись не создана: user={user_id}, time={message_text}")
+            
+            await update.message.reply_text(response)
+
+async def mybreaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает записи пользователя"""
+    user_id = update.effective_user.id
+    current_date = get_current_date()
+    
+    user_breaks = get_user_breaks(user_id, current_date)
+    
+    if user_breaks:
+        text = (
+            f"📋 МОИ ЗАПИСИ\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 Дата: {current_date}\n\n"
+        )
+        for i, break_time in enumerate(user_breaks, 1):
+            full_slot = break_time
+            for slot in get_break_slots():
+                if slot.startswith(break_time):
+                    full_slot = slot
+                    break
+            text += f"{i}. 🕐 {full_slot}\n"
+    else:
+        text = (
+            f"📋 МОИ ЗАПИСИ\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"❌ У вас нет записей на сегодня\n\n"
+            f"📝 /breaks - Записаться на перерыв"
+        )
+    
+    await update.message.reply_text(text)
+
+async def allbreaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает расписание со всеми 10-минутными слотами и никнеймами"""
+    current_date = get_current_date()
+    all_breaks = get_all_breaks(current_date)
+    
+    # Получаем ВСЕ полные 10-минутные слоты
+    all_slots = get_break_slots()
+    
+    text = (
+        f"👥 РАСПИСАНИЕ ({current_date}):\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    
+    # Показываем слоты с 10:00 до 18:50
+    for slot in all_slots:
+        break_time = slot.split('-')[0]
+        
+        if break_time in all_breaks:
+            names = ", ".join(all_breaks[break_time])
+            text += f"{slot}: {names}\n"
+        else:
+            text += f"{slot}: свободно\n"
+    
+    # Добавляем статистику
+    total_slots = len(all_slots)
+    booked_slots = len(all_breaks)
+    free_slots = total_slots - booked_slots
+    
+    text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📊 Статистика:\n"
+    text += f"🟢 Свободно: {free_slots} слотов\n"
+    text += f"📝 Занято: {booked_slots} слотов\n"
+    text += f"⏰ Всего: {total_slots} слотов\n"
+    
+    await update.message.reply_text(text)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику"""
+    stats = get_statistics()
+    
+    text = (
+        f"📊 СТАТИСТИКА БОТА\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Всего пользователей: {stats['total_users']}\n"
+        f"📝 Всего записей: {stats['total_breaks']}\n"
+        f"📅 Записей сегодня: {stats['today_breaks']}\n"
+        f"🕐 Активных сегодня: {stats['active_users']}\n\n"
+    )
+    
+    if stats['popular_times']:
+        text += "🔥 Популярное время:\n"
+        for i, (time, count) in enumerate(stats['popular_times'], 1):
+            full_slot = time
+            for slot in get_break_slots():
+                if slot.startswith(time):
+                    full_slot = slot
+                    break
+            text += f"{i}. {full_slot} — {count} зап.\n"
+    
+    await update.message.reply_text(text)
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /debug - проверка работы"""
@@ -291,7 +618,6 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"🔍 /debug от {user.id}")
     
-    # Проверяем базу данных
     db_status = "✅ Работает"
     try:
         conn = sqlite3.connect(DATABASE_URL)
@@ -307,292 +633,67 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_info = str(e)[:100]
     
     response = (
-        f"🔧 Отладка системы\n\n"
+        f"🔧 ДИАГНОСТИКА\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🤖 Бот: ✅ Работает\n"
         f"👤 Ваш ID: {user.id}\n"
         f"🕐 Москва: {get_moscow_time()}\n"
         f"📅 Дата: {get_current_date()}\n"
         f"🗄️ База данных: {db_status}\n"
-        f"   {db_info}\n"
-        f"🌐 Сервер: ded1-8.onrender.com\n\n"
-        f"Авто-пинг: каждые 8 минут"
+        f"   {db_info}\n\n"
+        f"⏰ Таймслоты: 10 минут\n"
+        f"👥 Лимит: 3 человека\n"
+        f"🔄 Авто-пинг: каждые 8 минут\n"
+        f"📱 Меню: Статичные команды\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     
     await update.message.reply_text(response)
 
-async def breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /breaks"""
-    await show_breaks_menu(update, context)
-
-async def my_breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /my_breaks"""
-    await show_my_breaks(update, context)
-
-async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /today"""
-    await show_today_schedule(update, context)
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /stats"""
-    await show_statistics(update, context)
-
-# ================== ОБРАБОТЧИКИ КНОПОК ==================
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на inline-кнопки"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    data = query.data
-    
-    logger.info(f"🔘 Кнопка: {data} от {user_id}")
-    
-    if data == "show_breaks":
-        await show_breaks_menu(update, context)
-    elif data == "my_breaks":
-        await show_my_breaks(update, context)
-    elif data == "today_schedule":
-        await show_today_schedule(update, context)
-    elif data == "show_stats":
-        await show_statistics(update, context)
-    elif data.startswith("select_"):
-        break_time = data.replace("select_", "")
-        await confirm_break_selection(update, context, break_time)
-    elif data.startswith("confirm_"):
-        break_time = data.replace("confirm_", "")
-        await process_break_registration(update, context, break_time)
-    elif data == "back_to_menu":
-        await start_command(update, context)
-
-async def show_breaks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню выбора времени"""
-    query = update.callback_query
-    user_id = query.from_user.id if query else update.effective_user.id
-    
-    current_date = get_current_date()
-    user_breaks = get_user_breaks(user_id, current_date)
-    
-    # Создаем клавиатуру
-    keyboard = []
-    break_times = get_break_times()
-    
-    for i in range(0, len(break_times), 3):
-        row = []
-        for j in range(3):
-            if i + j < len(break_times):
-                time = break_times[i + j]
-                if time in user_breaks:
-                    row.append(InlineKeyboardButton(f"✅ {time}", callback_data=f"select_{time}"))
-                else:
-                    row.append(InlineKeyboardButton(f"🕐 {time}", callback_data=f"select_{time}"))
-        keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    text = (
-        f"📝 ЗАПИСАТЬСЯ НА ПЕРЕРЫВ\n\n"
-        f"📅 Дата: {current_date}\n"
-        f"👤 Ваши записи: {', '.join(user_breaks) if user_breaks else 'нет'}\n\n"
-        f"✅ — вы записаны\n"
-        f"🕐 — свободно"
-    )
-    
-    if query:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=reply_markup
-        )
-
-async def confirm_break_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
-    """Подтверждение выбора времени"""
-    query = update.callback_query
-    
-    text = (
-        f"🕐 ПОДТВЕРЖДЕНИЕ ЗАПИСИ\n\n"
-        f"Время: {break_time}\n"
-        f"Дата: {get_current_date()}\n\n"
-        f"Подтверждаете запись?"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, записать", callback_data=f"confirm_{break_time}"),
-            InlineKeyboardButton("❌ Нет, отменить", callback_data="show_breaks")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text=text, reply_markup=reply_markup)
-
-async def process_break_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
-    """Обработка записи на перерыв"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    current_date = get_current_date()
-    
-    # Сохраняем запись
-    success = save_break_to_db(user_id, break_time, current_date)
-    
-    if success:
-        text = (
-            f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n\n"
-            f"🕐 Время: {break_time}\n"
-            f"📅 Дата: {current_date}\n\n"
-            f"Вы успешно записаны на перерыв!"
-        )
-        logger.info(f"✅ Запись сохранена: user={user_id}, time={break_time}")
-    else:
-        text = (
-            f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n\n"
-            f"Вы уже записаны на {break_time}\n"
-            f"Выберите другое время!"
-        )
-        logger.info(f"⚠️ Запись уже существует: user={user_id}, time={break_time}")
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 ЕЩЁ ЗАПИСЬ", callback_data="show_breaks")],
-        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text=text, reply_markup=reply_markup)
-
-async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает записи пользователя"""
-    query = update.callback_query
-    user_id = query.from_user.id if query else update.effective_user.id
-    current_date = get_current_date()
-    
-    user_breaks = get_user_breaks(user_id, current_date)
-    
-    if user_breaks:
-        text = f"📋 МОИ ЗАПИСИ НА {current_date}\n\n"
-        for i, break_time in enumerate(user_breaks, 1):
-            text += f"{i}. 🕐 {break_time}\n"
-    else:
-        text = (
-            f"📋 МОИ ЗАПИСИ\n\n"
-            f"❌ У вас нет записей на сегодня\n"
-            f"Запишитесь на перерыв!"
-        )
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks")],
-        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if query:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=reply_markup
-        )
-
-async def show_today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает все бронирования"""
-    query = update.callback_query
-    current_date = get_current_date()
-    
-    all_breaks = get_all_breaks(current_date)
-    
-    if all_breaks:
-        text = f"👥 ВСЕ БРОНИРОВАНИЯ НА {current_date}\n\n"
-        for break_time in get_break_times():
-            if break_time in all_breaks:
-                users = ", ".join(all_breaks[break_time][:3])
-                if len(all_breaks[break_time]) > 3:
-                    users += f" и ещё {len(all_breaks[break_time]) - 3}"
-                text += f"🕐 {break_time}: {users}\n"
-            else:
-                text += f"🕐 {break_time}: свободно\n"
-    else:
-        text = (
-            f"👥 ВСЕ БРОНИРОВАНИЯ\n\n"
-            f"❌ На сегодня ещё нет записей\n"
-            f"Будьте первым!"
-        )
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks")],
-        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if query:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=reply_markup
-        )
-
-async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает статистику"""
-    query = update.callback_query
-    
-    stats = get_statistics()
-    
-    text = (
-        f"📊 СТАТИСТИКА БОТА\n\n"
-        f"👥 Всего пользователей: {stats['total_users']}\n"
-        f"📝 Всего записей: {stats['total_breaks']}\n"
-        f"📅 Записей сегодня: {stats['today_breaks']}\n"
-        f"🕐 Активных сегодня: {stats['active_users']}\n\n"
-    )
-    
-    if stats['popular_times']:
-        text += "🔥 Популярное время:\n"
-        for i, (time, count) in enumerate(stats['popular_times'], 1):
-            text += f"{i}. {time} — {count} зап.\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks")],
-        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(text=text, reply_markup=reply_markup)
-
 # ================== ЗАПУСК ТЕЛЕГРАМ БОТА ==================
+async def setup_bot_commands(application: Application):
+    """Установка команд для меню Telegram"""
+    commands = [
+        BotCommand("start", "🏠 Главное меню"),
+        BotCommand("breaks", "📝 Записаться на перерыв"),
+        BotCommand("mybreaks", "📋 Мои записи"),
+        BotCommand("allbreaks", "👥 Расписание"),
+        BotCommand("stats", "📊 Статистика"),
+        BotCommand("help", "❓ Помощь"),
+        BotCommand("debug", "🔧 Диагностика"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("✅ Команды меню установлены")
+
 async def start_bot():
     """Запуск Telegram бота"""
     global bot_app
     
     logger.info("🤖 Инициализация Telegram бота...")
     
-    # Ждем стабилизации сети
     await asyncio.sleep(5)
     
     try:
-        # Создаем приложение
         bot_app = Application.builder().token(TOKEN).build()
         logger.info("✅ Приложение создано")
         
-        # Добавляем обработчики
+        await setup_bot_commands(bot_app)
+        
         bot_app.add_handler(CommandHandler("start", start_command))
         bot_app.add_handler(CommandHandler("help", help_command))
         bot_app.add_handler(CommandHandler("debug", debug_command))
         bot_app.add_handler(CommandHandler("breaks", breaks_command))
-        bot_app.add_handler(CommandHandler("my_breaks", my_breaks_command))
-        bot_app.add_handler(CommandHandler("today", today_command))
+        bot_app.add_handler(CommandHandler("mybreaks", mybreaks_command))
+        bot_app.add_handler(CommandHandler("allbreaks", allbreaks_command))
         bot_app.add_handler(CommandHandler("stats", stats_command))
-        bot_app.add_handler(CallbackQueryHandler(button_callback))
+        
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_break_registration))
         
         logger.info("✅ Все обработчики добавлены")
         
-        # Инициализируем и запускаем
         await bot_app.initialize()
         await bot_app.start()
         
-        # Начинаем polling
         await bot_app.updater.start_polling(
             poll_interval=1.0,
             timeout=20,
@@ -610,9 +711,7 @@ async def start_bot():
 def start_auto_ping():
     """Запускает авто-пинг в отдельном потоке"""
     def ping_worker():
-        # Ждем полного запуска
         time.sleep(30)
-        
         url = "https://ded1-8.onrender.com"
         logger.info(f"🧵 Авто-пинг запущен для {url}")
         
@@ -628,7 +727,6 @@ def start_auto_ping():
             except Exception as e:
                 logger.error(f"❌ Ошибка авто-пинга #{ping_count}: {e}")
             
-            # Пинг каждые 8 минут
             time.sleep(480)
     
     thread = threading.Thread(target=ping_worker, daemon=True)
@@ -647,7 +745,9 @@ async def root():
         "time_moscow": get_moscow_time(),
         "date": get_current_date(),
         "uptime": str(datetime.now(timezone.utc) - startup_time),
-        "version": "4.0"
+        "version": "6.0",
+        "slot_duration": "10 минут",
+        "slot_limit": "3 человека"
     }
 
 @app.get("/health")
@@ -671,7 +771,10 @@ async def status():
         },
         "bot": {
             "initialized": bool(bot_app),
-            "database": "connected"
+            "database": "connected",
+            "menu_type": "static_commands",
+            "slot_duration": "10 минут",
+            "slot_limit": "3 человека"
         }
     }
 
@@ -688,24 +791,24 @@ async def startup_event():
     logger.info("🚀 ЗАПУСК БОТА ДЛЯ ЗАПИСИ НА ПЕРЕРЫВЫ")
     logger.info("=" * 60)
     
-    # Инициализируем БД
     init_db()
     
     logger.info(f"✅ Токен бота: Найден")
     logger.info(f"⏰ Время по Москве: {get_moscow_time()}")
     logger.info(f"📅 Дата: {get_current_date()}")
     logger.info(f"🌐 Порт: {PORT}")
+    logger.info(f"⏱️ Таймслоты: 10 минут")
+    logger.info(f"👥 Лимит: 3 человека на слот")
     logger.info("=" * 60)
     
-    # Запускаем авто-пинг
     start_auto_ping()
     logger.info("🔧 Авто-пинг запущен (пинг каждые 8 минут)")
     
-    # Запускаем бота
     success = await start_bot()
     
     if success:
         logger.info("🎉 Все системы запущены и готовы к работе!")
+        logger.info("📱 Режим: СТАТИЧНОЕ МЕНЮ | 10-МИНУТНЫЕ СЛОТЫ | ЛИМИТ 3 ЧЕЛОВЕКА")
     else:
         logger.error("💥 Не удалось запустить бота!")
 
