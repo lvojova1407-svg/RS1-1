@@ -35,6 +35,7 @@ if not TOKEN:
 
 PORT = int(os.getenv("PORT", 10000))
 DATABASE_URL = os.getenv("DATABASE_URL", "breaks.db")
+RENDER_URL = "https://rs1-1.onrender.com"  # ✅ Твоя переменная для авто-пинга
 
 # Настройка логгирования
 logging.basicConfig(
@@ -48,7 +49,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Telegram Bot для записи на перерывы",
     description="Бот для организации перерывов с 10-минутными слотами",
-    version="7.2"
+    version="7.3"
 )
 
 # Глобальные переменные
@@ -427,7 +428,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕐 {get_moscow_time()} · 📅 {get_current_date()}\n"
         f"🗄️ БД: {db_status}\n"
         f"   {db_info}\n"
-        f"⏱️ 10 мин · 👥 3 чел. · 🗑️ Отмена есть"
+        f"⏱️ 10 мин · 👥 3 чел. · 🗑️ Отмена есть\n"
+        f"🌐 {RENDER_URL}"
     )
     
     await update.message.reply_text(response)
@@ -454,15 +456,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("select_"):
         break_time = data.replace("select_", "")
         await confirm_break_selection(update, context, break_time)
-    elif data.startswith("confirm_"):
+    elif data.startswith("confirm_cancel_"):  # 🟢 ОТМЕНА - ПЕРВАЯ! (важен порядок)
+        break_time = data.replace("confirm_cancel_", "")
+        await process_break_cancellation(update, context, break_time)
+    elif data.startswith("confirm_"):         # 🟢 ЗАПИСЬ - ВТОРАЯ!
         break_time = data.replace("confirm_", "")
         await process_break_registration(update, context, break_time)
     elif data.startswith("cancel_"):
         break_time = data.replace("cancel_", "")
         await confirm_cancel_break(update, context, break_time)
-    elif data.startswith("confirm_cancel_"):
-        break_time = data.replace("confirm_cancel_", "")
-        await process_break_cancellation(update, context, break_time)
     elif data == "back_to_menu":
         await start_command(update, context)
 
@@ -665,11 +667,12 @@ async def confirm_cancel_break(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(text=text, reply_markup=reply_markup)
 
 async def process_break_cancellation(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
-    """🗑️ ОБРАБОТКА ОТМЕНЫ ЗАПИСИ"""
+    """🗑️ ОБРАБОТКА ОТМЕНЫ ЗАПИСИ (УДАЛЕНИЕ ИЗ БД)"""
     query = update.callback_query
     user_id = query.from_user.id
     current_date = get_current_date()
     
+    # ✅ УДАЛЯЕМ запись, а не создаем новую
     success = delete_break_from_db(user_id, break_time, current_date)
     
     full_slot = break_time
@@ -682,11 +685,11 @@ async def process_break_cancellation(update: Update, context: ContextTypes.DEFAU
         text = f"✅ Запись на {full_slot} отменена!\n\nСлот снова свободен 🟢"
         logger.info(f"🗑️ Отмена записи: {user_id} снял {break_time}")
     else:
-        text = "❌ Запись не найдена"
+        text = "❌ Запись не найдена или уже отменена"
         logger.warning(f"⚠️ Ошибка отмены: {user_id} — запись не найдена")
     
     keyboard = [
-        [InlineKeyboardButton("📅 Мои записи", callback_data="my_breaks")],
+        [InlineKeyboardButton("📋 Мои записи", callback_data="my_breaks")],
         [InlineKeyboardButton("← В меню", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -836,14 +839,13 @@ def start_auto_ping():
     """Запускает авто-пинг в отдельном потоке"""
     def ping_worker():
         time.sleep(30)
-        url = "https://rs1-1.onrender.com"
-        logger.info(f"🧵 Авто-пинг запущен для {url}")
+        logger.info(f"🧵 Авто-пинг запущен для {RENDER_URL}")
         
         ping_count = 0
         while True:
             ping_count += 1
             try:
-                response = requests.get(f"{url}/health", timeout=10)
+                response = requests.get(f"{RENDER_URL}/health", timeout=10)
                 if response.status_code == 200:
                     logger.info(f"✅ Авто-пинг #{ping_count} успешен")
                 else:
@@ -851,7 +853,7 @@ def start_auto_ping():
             except Exception as e:
                 logger.error(f"❌ Ошибка авто-пинга #{ping_count}: {e}")
             
-            time.sleep(480)
+            time.sleep(480)  # 8 минут
     
     thread = threading.Thread(target=ping_worker, daemon=True)
     thread.start()
@@ -869,7 +871,8 @@ async def root():
         "time_moscow": get_moscow_time(),
         "date": get_current_date(),
         "uptime": str(datetime.now(timezone.utc) - startup_time),
-        "version": "7.2",
+        "version": "7.3",
+        "render_url": RENDER_URL,
         "slot_duration": "10 минут",
         "slot_limit": "3 человека",
         "cancellation": "доступна"
@@ -882,7 +885,8 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "bot_running": bool(bot_app),
-        "time_moscow": get_moscow_time()
+        "time_moscow": get_moscow_time(),
+        "render_url": RENDER_URL
     }
 
 @app.get("/status")
@@ -892,7 +896,8 @@ async def status():
         "server": {
             "uptime": str(datetime.now(timezone.utc) - startup_time),
             "port": PORT,
-            "startup_time": startup_time.isoformat()
+            "startup_time": startup_time.isoformat(),
+            "render_url": RENDER_URL
         },
         "bot": {
             "initialized": bool(bot_app),
@@ -907,7 +912,7 @@ async def status():
 @app.get("/ping")
 async def ping():
     """Ручной пинг"""
-    return {"ping": "pong", "time": get_moscow_time()}
+    return {"ping": "pong", "time": get_moscow_time(), "render_url": RENDER_URL}
 
 # ================== ЗАПУСК ПРИЛОЖЕНИЯ ==================
 @app.on_event("startup")
@@ -923,6 +928,7 @@ async def startup_event():
     logger.info(f"⏰ Время по Москве: {get_moscow_time()}")
     logger.info(f"📅 Дата: {get_current_date()}")
     logger.info(f"🌐 Порт: {PORT}")
+    logger.info(f"🌍 Render URL: {RENDER_URL}")
     logger.info(f"⏱️ Таймслоты: 10 минут")
     logger.info(f"👥 Лимит: 3 человека на слот")
     logger.info(f"🗑️ Отмена записи: ДОСТУПНА")
@@ -936,6 +942,7 @@ async def startup_event():
     if success:
         logger.info("🎉 Все системы запущены и готовы к работе!")
         logger.info("🎨 Режим: INLINE КНОПКИ | ОТМЕНА ЗАПИСИ | UX/UI ОПТИМИЗИРОВАН")
+        logger.info(f"🌍 Пинг на: {RENDER_URL}")
     else:
         logger.error("💥 Не удалось запустить бота!")
 
