@@ -1,6 +1,6 @@
 """
 🤖 Telegram Bot для записи на перерывы - РАБОЧАЯ ВЕРСИЯ 24/7
-🚀 Авто-пинг, SQLite база, кнопки меню
+🚀 Все кнопки кликабельны, авто-пинг, SQLite база
 """
 import os
 import asyncio
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Telegram Bot для записи на перерывы",
     description="Бот для организации перерывов с авто-пингом",
-    version="3.0"
+    version="4.0"
 )
 
 # Глобальные переменные
@@ -177,7 +177,7 @@ def get_all_breaks(break_date: str) -> Dict[str, List[str]]:
 
 # ================== КОМАНДЫ БОТА ==================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
+    """Обработчик команды /start - ГЛАВНОЕ МЕНЮ"""
     user = update.effective_user
     chat_id = update.effective_chat.id
     
@@ -196,34 +196,37 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 Я бот для записи на перерывы\n\n"
         f"📅 Сегодня: {get_current_date()}\n"
         f"⏰ Время по Москве: {get_moscow_time()}\n\n"
-        f"Доступные команды:\n"
-        f"/start - Главное меню\n"
-        f"/breaks - Запись на перерыв\n"
-        f"/my_breaks - Мои записи\n"
-        f"/today - Расписание на сегодня\n"
-        f"/help - Помощь\n\n"
         f"Выберите действие:"
     )
     
+    # КНОПКИ ГЛАВНОГО МЕНЮ
     keyboard = [
         [InlineKeyboardButton("📅 Записаться на перерыв", callback_data="show_breaks")],
         [InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks")],
-        [InlineKeyboardButton("📋 Расписание", callback_data="today_schedule")]
+        [InlineKeyboardButton("📋 Расписание на сегодня", callback_data="today_schedule")],
+        [InlineKeyboardButton("❓ Помощь", callback_data="help_info")],
+        [InlineKeyboardButton("🔧 Отладка", callback_data="debug_info")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=welcome_text,
-        reply_markup=reply_markup
-    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=welcome_text,
+            reply_markup=reply_markup
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=welcome_text,
+            reply_markup=reply_markup
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
         "🤖 Помощь по боту\n\n"
         "Основные команды:\n"
-        "/start - Начало работы\n"
+        "/start - Главное меню\n"
         "/breaks - Записаться на перерыв\n"
         "/my_breaks - Мои записи\n"
         "/today - Расписание на сегодня\n"
@@ -235,7 +238,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Бот работает круглосуточно!"
     )
     
-    await update.message.reply_text(help_text)
+    keyboard = [
+        [InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=help_text,
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(help_text, reply_markup=reply_markup)
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /debug - проверка работы"""
@@ -270,7 +284,18 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Авто-пинг: каждые 8 минут"
     )
     
-    await update.message.reply_text(response)
+    keyboard = [
+        [InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text=response,
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(response, reply_markup=reply_markup)
 
 async def breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /breaks"""
@@ -286,67 +311,110 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== ОБРАБОТЧИКИ КНОПОК ==================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на inline-кнопки"""
+    """Обработчик ВСЕХ inline-кнопок"""
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Убираем "часики" у кнопки
     
     user_id = query.from_user.id
     data = query.data
     
-    logger.info(f"🔘 Кнопка: {data} от {user_id}")
+    logger.info(f"🔘 Нажата кнопка: {data} от {user_id}")
     
+    # ОБРАБОТКА ВСЕХ ВОЗМОЖНЫХ КНОПОК
     if data == "show_breaks":
         await show_breaks_menu(update, context)
+    
     elif data == "my_breaks":
         await show_my_breaks(update, context)
+    
     elif data == "today_schedule":
         await show_today_schedule(update, context)
-    elif data.startswith("select_"):
-        break_time = data.replace("select_", "")
-        await confirm_break_selection(update, context, break_time)
-    elif data.startswith("confirm_"):
-        break_time = data.replace("confirm_", "")
-        await process_break_registration(update, context, break_time)
+    
+    elif data == "help_info":
+        await help_command(update, context)
+    
+    elif data == "debug_info":
+        await debug_command(update, context)
+    
     elif data == "back_to_menu":
         await start_command(update, context)
+    
+    elif data == "back_to_breaks":
+        await show_breaks_menu(update, context)
+    
+    elif data.startswith("select_"):
+        # Выбор времени перерыва
+        break_time = data.replace("select_", "")
+        await confirm_break_selection(update, context, break_time)
+    
+    elif data.startswith("confirm_"):
+        # Подтверждение записи
+        break_time = data.replace("confirm_", "")
+        await process_break_registration(update, context, break_time)
+    
+    elif data.startswith("cancel_"):
+        # Отмена записи (если нужно будет добавить)
+        break_time = data.replace("cancel_", "")
+        await cancel_break_registration(update, context, break_time)
+    
+    else:
+        # Неизвестная кнопка
+        logger.warning(f"⚠️ Неизвестная кнопка: {data}")
+        await query.edit_message_text(
+            "❌ Эта кнопка не работает\n\n"
+            "Нажмите /start для возврата в меню"
+        )
 
+# ================== ФУНКЦИИ ДЛЯ КНОПОК ==================
 async def show_breaks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню выбора времени"""
+    """Показывает меню выбора времени перерыва"""
     query = update.callback_query
     user_id = query.from_user.id if query else update.effective_user.id
     
     current_date = get_current_date()
     user_breaks = get_user_breaks(user_id, current_date)
     
-    # Создаем клавиатуру
-    keyboard = []
+    # Получаем список всех времен
     break_times = get_break_times()
     
+    # СОЗДАЕМ КНОПКИ ВРЕМЕНИ (по 3 в ряду)
+    keyboard = []
     for i in range(0, len(break_times), 3):
         row = []
         for j in range(3):
             if i + j < len(break_times):
                 time = break_times[i + j]
+                # Проверяем, записан ли уже пользователь на это время
                 if time in user_breaks:
                     row.append(InlineKeyboardButton(f"✅ {time}", callback_data=f"select_{time}"))
                 else:
                     row.append(InlineKeyboardButton(f"🕐 {time}", callback_data=f"select_{time}"))
         keyboard.append(row)
     
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
+    # КНОПКИ НАВИГАЦИИ
+    keyboard.append([
+        InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks"),
+        InlineKeyboardButton("📋 Расписание", callback_data="today_schedule")
+    ])
+    keyboard.append([InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")])
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # ТЕКСТ СООБЩЕНИЯ
     text = (
         f"📅 Запись на перерыв\n\n"
         f"Дата: {current_date}\n"
         f"Ваши записи: {', '.join(user_breaks) if user_breaks else 'нет'}\n\n"
         f"Выберите время:\n"
-        f"✅ - уже записаны\n"
-        f"🕐 - доступно"
+        f"✅ - вы уже записаны\n"
+        f"🕐 - доступно для записи"
     )
     
     if query:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup
+        )
     else:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -362,18 +430,22 @@ async def confirm_break_selection(update: Update, context: ContextTypes.DEFAULT_
         f"🕐 Подтверждение записи\n\n"
         f"Время: {break_time}\n"
         f"Дата: {get_current_date()}\n\n"
-        f"Подтверждаете запись?"
+        f"Вы уверены, что хотите записаться?"
     )
     
     keyboard = [
         [
             InlineKeyboardButton("✅ Да, записать", callback_data=f"confirm_{break_time}"),
-            InlineKeyboardButton("❌ Нет, отменить", callback_data="show_breaks")
-        ]
+            InlineKeyboardButton("❌ Нет, отменить", callback_data="back_to_breaks")
+        ],
+        [InlineKeyboardButton("🔙 Назад к выбору времени", callback_data="back_to_breaks")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(text=text, reply_markup=reply_markup)
+    await query.edit_message_text(
+        text=text,
+        reply_markup=reply_markup
+    )
 
 async def process_break_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
     """Обработка записи на перерыв"""
@@ -381,7 +453,7 @@ async def process_break_registration(update: Update, context: ContextTypes.DEFAU
     user_id = query.from_user.id
     current_date = get_current_date()
     
-    # Сохраняем запись
+    # Сохраняем запись в БД
     success = save_break_to_db(user_id, break_time, current_date)
     
     if success:
@@ -389,27 +461,32 @@ async def process_break_registration(update: Update, context: ContextTypes.DEFAU
             f"✅ Запись подтверждена!\n\n"
             f"Время: {break_time}\n"
             f"Дата: {current_date}\n\n"
-            f"Вы успешно записаны!"
+            f"Вы успешно записаны на перерыв!"
         )
         logger.info(f"✅ Запись сохранена: user={user_id}, time={break_time}")
     else:
         text = (
             f"⚠️ Запись уже существует!\n\n"
-            f"Вы уже записаны на {break_time}"
+            f"Вы уже записаны на перерыв в {break_time}\n"
+            f"Дата: {current_date}"
         )
         logger.info(f"⚠️ Запись уже существует: user={user_id}, time={break_time}")
     
     keyboard = [
         [InlineKeyboardButton("📅 Еще одна запись", callback_data="show_breaks")],
         [InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks")],
+        [InlineKeyboardButton("📋 Расписание", callback_data="today_schedule")],
         [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(text=text, reply_markup=reply_markup)
+    await query.edit_message_text(
+        text=text,
+        reply_markup=reply_markup
+    )
 
 async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает записи пользователя"""
+    """Показывает записи пользователя - работает по кнопке"""
     query = update.callback_query
     user_id = query.from_user.id if query else update.effective_user.id
     current_date = get_current_date()
@@ -417,25 +494,29 @@ async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_breaks = get_user_breaks(user_id, current_date)
     
     if user_breaks:
-        text = f"👤 Ваши записи на {current_date}:\n\n"
+        text = f"👤 Ваши записи на сегодня ({current_date}):\n\n"
         for i, break_time in enumerate(user_breaks, 1):
             text += f"{i}. 🕐 {break_time}\n"
+        text += f"\nВсего записей: {len(user_breaks)}"
     else:
         text = (
             f"👤 Ваши записи\n\n"
-            f"На {current_date} нет записей.\n"
+            f"На сегодня ({current_date}) у вас нет записей.\n"
             f"Запишитесь на перерыв!"
         )
     
     keyboard = [
-        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
-        [InlineKeyboardButton("📋 Расписание", callback_data="today_schedule")],
-        [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton("📅 Записаться на перерыв", callback_data="show_breaks")],
+        [InlineKeyboardButton("📋 Расписание на сегодня", callback_data="today_schedule")],
+        [InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if query:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup
+        )
     else:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -444,14 +525,14 @@ async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def show_today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает расписание на сегодня"""
+    """Показывает расписание на сегодня - работает по кнопке"""
     query = update.callback_query
     current_date = get_current_date()
     
     all_breaks = get_all_breaks(current_date)
     
     if all_breaks:
-        text = f"📋 Расписание на {current_date}:\n\n"
+        text = f"📋 Расписание на сегодня ({current_date}):\n\n"
         for break_time in get_break_times():
             if break_time in all_breaks:
                 users = ", ".join(all_breaks[break_time][:3])  # Показываем первых 3
@@ -460,22 +541,26 @@ async def show_today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE
                 text += f"🕐 {break_time}: {users}\n"
             else:
                 text += f"🕐 {break_time}: свободно\n"
+        text += f"\nВсего записей: {sum(len(v) for v in all_breaks.values())}"
     else:
         text = (
-            f"📋 Расписание на {current_date}\n\n"
+            f"📋 Расписание на сегодня ({current_date})\n\n"
             f"На сегодня ещё нет записей.\n"
             f"Будьте первым!"
         )
     
     keyboard = [
-        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
+        [InlineKeyboardButton("📅 Записаться на перерыв", callback_data="show_breaks")],
         [InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks")],
-        [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if query:
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup
+        )
     else:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -498,13 +583,15 @@ async def start_bot():
         bot_app = Application.builder().token(TOKEN).build()
         logger.info("✅ Приложение создано")
         
-        # Добавляем обработчики
+        # Добавляем ВСЕ обработчики
         bot_app.add_handler(CommandHandler("start", start_command))
         bot_app.add_handler(CommandHandler("help", help_command))
         bot_app.add_handler(CommandHandler("debug", debug_command))
         bot_app.add_handler(CommandHandler("breaks", breaks_command))
         bot_app.add_handler(CommandHandler("my_breaks", my_breaks_command))
         bot_app.add_handler(CommandHandler("today", today_command))
+        
+        # Добавляем обработчик ВСЕХ кнопок
         bot_app.add_handler(CallbackQueryHandler(button_callback))
         
         logger.info("✅ Все обработчики добавлены")
@@ -525,6 +612,8 @@ async def start_bot():
         
     except Exception as e:
         logger.error(f"💥 Ошибка при запуске бота: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 # ================== АВТО-ПИНГ ==================
@@ -568,7 +657,8 @@ async def root():
         "time_moscow": get_moscow_time(),
         "date": get_current_date(),
         "uptime": str(datetime.now(timezone.utc) - startup_time),
-        "version": "3.0"
+        "version": "4.0",
+        "features": "Все кнопки рабочие"
     }
 
 @app.get("/health")
@@ -578,7 +668,8 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "bot_running": bool(bot_app),
-        "time_moscow": get_moscow_time()
+        "time_moscow": get_moscow_time(),
+        "date": get_current_date()
     }
 
 @app.get("/status")
@@ -592,7 +683,8 @@ async def status():
         },
         "bot": {
             "initialized": bool(bot_app),
-            "database": "connected"
+            "database": "connected",
+            "version": "4.0"
         }
     }
 
@@ -606,7 +698,7 @@ async def ping():
 async def startup_event():
     """Запуск при старте приложения"""
     logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК БОТА ДЛЯ ЗАПИСИ НА ПЕРЕРЫВЫ")
+    logger.info("🚀 ЗАПУСК БОТА С РАБОЧИМИ КНОПКАМИ")
     logger.info("=" * 60)
     
     # Инициализируем БД
@@ -627,6 +719,7 @@ async def startup_event():
     
     if success:
         logger.info("🎉 Все системы запущены и готовы к работе!")
+        logger.info("💡 Все кнопки теперь кликабельны!")
     else:
         logger.error("💥 Не удалось запустить бота!")
 
@@ -650,6 +743,7 @@ async def shutdown_event():
 def main():
     """Основная функция запуска"""
     logger.info(f"🌍 Запуск сервера на порту {PORT}...")
+    logger.info(f"🎯 Версия 4.0 - Все кнопки рабочие")
     
     uvicorn.run(
         app,
