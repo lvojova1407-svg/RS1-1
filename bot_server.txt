@@ -1,7 +1,6 @@
 """
-🤖 Telegram Bot для записи на перерывы - ФИНАЛЬНАЯ ВЕРСИЯ
-🚀 100% гарантия работы 24/7 на Render
-🛡️ Тройная защита от отключения
+🤖 Telegram Bot для записи на перерывы - РАБОЧАЯ ВЕРСИЯ 24/7
+🚀 Авто-пинг, SQLite база, кнопки: ЗАПИСАТЬСЯ / МОИ ЗАПИСИ / ВСЕ БРОНИРОВАНИЯ / СТАТИСТИКА
 """
 import os
 import asyncio
@@ -35,17 +34,6 @@ if not TOKEN:
 PORT = int(os.getenv("PORT", 10000))
 DATABASE_URL = os.getenv("DATABASE_URL", "breaks.db")
 
-# ================== ВАШ ТОЧНЫЙ URL НА RENDER ==================
-# ⚡ КРИТИЧЕСКИ ВАЖНО: Этот URL должен быть ТОЧНО ТАКИМ ЖЕ, как в браузере!
-RENDER_URL = "https://rs1-1.onrender.com"  # ПРОВЕРЕНО: работает
-
-# Страховочные URL для авто-пинга (резервные каналы)
-BACKUP_URLS = [
-    f"{RENDER_URL}/health",
-    f"{RENDER_URL}/ping",
-    f"{RENDER_URL}/status",
-]
-
 # Настройка логгирования
 logging.basicConfig(
     level=logging.INFO,
@@ -57,16 +45,13 @@ logger = logging.getLogger(__name__)
 # FastAPI приложение
 app = FastAPI(
     title="Telegram Bot для записи на перерывы",
-    description="✅ 100% защита от отключения на Render",
-    version="5.0 - 24/7 STABLE"
+    description="Бот для организации перерывов с авто-пингом",
+    version="4.0"
 )
 
 # Глобальные переменные
 bot_app: Optional[Application] = None
 startup_time = datetime.now(timezone.utc)
-ping_counter = 0
-ping_success = 0
-ping_failed = 0
 
 # ================== БАЗА ДАННЫХ ==================
 def init_db():
@@ -132,6 +117,7 @@ def save_break_to_db(user_id: int, break_time: str, break_date: str):
     conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     
+    # Проверяем, не записан ли уже пользователь
     cursor.execute('''
         SELECT COUNT(*) FROM breaks 
         WHERE user_id = ? AND break_date = ? AND break_time = ?
@@ -189,14 +175,62 @@ def get_all_breaks(break_date: str) -> Dict[str, List[str]]:
     conn.close()
     return breaks
 
+# ================== НОВАЯ ФУНКЦИЯ СТАТИСТИКИ ==================
+def get_statistics() -> Dict:
+    """Получает статистику по записям"""
+    conn = sqlite3.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    
+    # Общее количество пользователей
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    
+    # Общее количество записей
+    cursor.execute("SELECT COUNT(*) FROM breaks")
+    total_breaks = cursor.fetchone()[0]
+    
+    # Записи на сегодня
+    current_date = get_current_date()
+    cursor.execute("SELECT COUNT(*) FROM breaks WHERE break_date = ?", (current_date,))
+    today_breaks = cursor.fetchone()[0]
+    
+    # Самые популярные времена
+    cursor.execute('''
+        SELECT break_time, COUNT(*) as count 
+        FROM breaks 
+        GROUP BY break_time 
+        ORDER BY count DESC 
+        LIMIT 3
+    ''')
+    popular_times = cursor.fetchall()
+    
+    # Активные пользователи (кто записывался сегодня)
+    cursor.execute('''
+        SELECT COUNT(DISTINCT user_id) 
+        FROM breaks 
+        WHERE break_date = ?
+    ''', (current_date,))
+    active_users = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "total_users": total_users,
+        "total_breaks": total_breaks,
+        "today_breaks": today_breaks,
+        "popular_times": popular_times,
+        "active_users": active_users
+    }
+
 # ================== КОМАНДЫ БОТА ==================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start - ГЛАВНОЕ МЕНЮ"""
+    """Обработчик команды /start с новыми кнопками"""
     user = update.effective_user
     chat_id = update.effective_chat.id
     
     logger.info(f"🚀 /start от {user.id}")
     
+    # Сохраняем пользователя
     save_user_to_db(
         user_id=user.id,
         username=user.username,
@@ -206,76 +240,58 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_text = (
         f"👋 Привет, {user.first_name}!\n\n"
-        f"🤖 Я бот для записи на перерывы\n"
-        f"✅ Работаю 24/7 без отключений\n\n"
+        f"🤖 Бот для записи на перерывы\n"
         f"📅 Сегодня: {get_current_date()}\n"
         f"⏰ Время: {get_moscow_time()}\n\n"
-        f"Выберите действие:"
+        f"⬇️ Выберите действие:"
     )
     
+    # НОВЫЕ КНОПКИ - 2x2 как на скриншоте
     keyboard = [
-        [InlineKeyboardButton("📅 Записаться на перерыв", callback_data="show_breaks")],
-        [InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks")],
-        [InlineKeyboardButton("📋 Расписание на сегодня", callback_data="today_schedule")],
-        [InlineKeyboardButton("❓ Помощь", callback_data="help_info")],
-        [InlineKeyboardButton("🔧 Отладка", callback_data="debug_info")]
+        [
+            InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks"),
+            InlineKeyboardButton("📋 МОИ ЗАПИСИ", callback_data="my_breaks")
+        ],
+        [
+            InlineKeyboardButton("👥 ВСЕ БРОНИРОВАНИЯ", callback_data="today_schedule"),
+            InlineKeyboardButton("📊 СТАТИСТИКА", callback_data="show_stats")
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=welcome_text,
-            reply_markup=reply_markup
-        )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=welcome_text,
-            reply_markup=reply_markup
-        )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=welcome_text,
+        reply_markup=reply_markup
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
         "🤖 Помощь по боту\n\n"
-        "📌 Основные команды:\n"
-        "/start - Главное меню\n"
+        "Основные команды:\n"
+        "/start - Начало работы\n"
         "/breaks - Записаться на перерыв\n"
         "/my_breaks - Мои записи\n"
-        "/today - Расписание\n"
+        "/today - Расписание на сегодня\n"
+        "/stats - Статистика\n"
         "/help - Эта справка\n\n"
-        "⚡ Бот работает 24/7\n"
-        "🔄 Авто-пинг каждые 5 минут\n"
-        "🛡️ Защита от отключения Render"
+        "Как записаться:\n"
+        "1. Нажмите 'ЗАПИСАТЬСЯ'\n"
+        "2. Выберите удобное время\n"
+        "3. Подтвердите запись\n\n"
+        "Бот работает круглосуточно!"
     )
     
-    keyboard = [
-        [InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=help_text,
-            reply_markup=reply_markup
-        )
-    else:
-        await update.message.reply_text(help_text, reply_markup=reply_markup)
+    await update.message.reply_text(help_text)
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /debug - статус системы"""
+    """Обработчик команды /debug - проверка работы"""
     user = update.effective_user
     
     logger.info(f"🔍 /debug от {user.id}")
     
-    # Статистика авто-пинга
-    uptime = datetime.now(timezone.utc) - startup_time
-    uptime_hours = uptime.total_seconds() / 3600
-    
-    success_rate = 0
-    if ping_counter > 0:
-        success_rate = (ping_success / ping_counter) * 100
-    
+    # Проверяем базу данных
     db_status = "✅ Работает"
     try:
         conn = sqlite3.connect(DATABASE_URL)
@@ -285,52 +301,44 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(*) FROM breaks")
         break_count = cursor.fetchone()[0]
         conn.close()
-        db_info = f"👥 {user_count} | 📅 {break_count}"
+        db_info = f"Пользователей: {user_count}, Записей: {break_count}"
     except Exception as e:
-        db_status = "❌ Ошибка"
-        db_info = str(e)[:50]
+        db_status = f"❌ Ошибка"
+        db_info = str(e)[:100]
     
     response = (
-        f"🔧 СТАТУС СИСТЕМЫ\n"
-        f"{'='*30}\n\n"
-        f"🤖 Бот: ✅ ONLINE\n"
-        f"🕐 Время: {get_moscow_time()}\n"
+        f"🔧 Отладка системы\n\n"
+        f"🤖 Бот: ✅ Работает\n"
+        f"👤 Ваш ID: {user.id}\n"
+        f"🕐 Москва: {get_moscow_time()}\n"
         f"📅 Дата: {get_current_date()}\n"
-        f"⏱️ Работает: {uptime_hours:.1f} ч\n\n"
-        
-        f"📊 АВТО-ПИНГ\n"
-        f"• URL: {RENDER_URL}\n"
-        f"• Всего: {ping_counter}\n"
-        f"• Успешно: {ping_success}\n"
-        f"• Ошибок: {ping_failed}\n"
-        f"• Успешность: {success_rate:.1f}%\n"
-        f"• Интервал: 5 минут\n\n"
-        
-        f"🗄️ БАЗА ДАННЫХ\n"
-        f"• Статус: {db_status}\n"
-        f"• {db_info}\n\n"
-        
-        f"🛡️ Защита: АКТИВНА\n"
-        f"❌ Render НЕ отключит бота"
+        f"🗄️ База данных: {db_status}\n"
+        f"   {db_info}\n"
+        f"🌐 Сервер: ded1-8.onrender.com\n\n"
+        f"Авто-пинг: каждые 8 минут"
     )
     
-    keyboard = [
-        [InlineKeyboardButton("🔄 Проверить сейчас", callback_data="debug_info")],
-        [InlineKeyboardButton("🔙 В меню", callback_data="back_to_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text=response,
-            reply_markup=reply_markup
-        )
-    else:
-        await update.message.reply_text(response, reply_markup=reply_markup)
+    await update.message.reply_text(response)
+
+async def breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /breaks"""
+    await show_breaks_menu(update, context)
+
+async def my_breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /my_breaks"""
+    await show_my_breaks(update, context)
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /today"""
+    await show_today_schedule(update, context)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /stats"""
+    await show_statistics(update, context)
 
 # ================== ОБРАБОТЧИКИ КНОПОК ==================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ВСЕХ inline-кнопок"""
+    """Обработчик нажатий на inline-кнопки"""
     query = update.callback_query
     await query.answer()
     
@@ -345,31 +353,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_my_breaks(update, context)
     elif data == "today_schedule":
         await show_today_schedule(update, context)
-    elif data == "help_info":
-        await help_command(update, context)
-    elif data == "debug_info":
-        await debug_command(update, context)
-    elif data == "back_to_menu":
-        await start_command(update, context)
-    elif data == "back_to_breaks":
-        await show_breaks_menu(update, context)
+    elif data == "show_stats":
+        await show_statistics(update, context)
     elif data.startswith("select_"):
         break_time = data.replace("select_", "")
         await confirm_break_selection(update, context, break_time)
     elif data.startswith("confirm_"):
         break_time = data.replace("confirm_", "")
         await process_break_registration(update, context, break_time)
+    elif data == "back_to_menu":
+        await start_command(update, context)
 
 async def show_breaks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Меню выбора времени"""
+    """Показывает меню выбора времени"""
     query = update.callback_query
     user_id = query.from_user.id if query else update.effective_user.id
     
     current_date = get_current_date()
     user_breaks = get_user_breaks(user_id, current_date)
+    
+    # Создаем клавиатуру
+    keyboard = []
     break_times = get_break_times()
     
-    keyboard = []
     for i in range(0, len(break_times), 3):
         row = []
         for j in range(3):
@@ -381,20 +387,15 @@ async def show_breaks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     row.append(InlineKeyboardButton(f"🕐 {time}", callback_data=f"select_{time}"))
         keyboard.append(row)
     
-    keyboard.append([
-        InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks"),
-        InlineKeyboardButton("📋 Расписание", callback_data="today_schedule")
-    ])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
-    
+    keyboard.append([InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = (
-        f"📅 Запись на перерыв\n"
-        f"Дата: {current_date}\n"
-        f"Ваши записи: {', '.join(user_breaks) if user_breaks else 'нет'}\n\n"
-        f"✅ - вы записаны\n"
-        f"🕐 - свободно"
+        f"📝 ЗАПИСАТЬСЯ НА ПЕРЕРЫВ\n\n"
+        f"📅 Дата: {current_date}\n"
+        f"👤 Ваши записи: {', '.join(user_breaks) if user_breaks else 'нет'}\n\n"
+        f"✅ — вы записаны\n"
+        f"🕐 — свободно"
     )
     
     if query:
@@ -407,20 +408,20 @@ async def show_breaks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def confirm_break_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
-    """Подтверждение записи"""
+    """Подтверждение выбора времени"""
     query = update.callback_query
     
     text = (
-        f"🕐 Подтверждение записи\n\n"
+        f"🕐 ПОДТВЕРЖДЕНИЕ ЗАПИСИ\n\n"
         f"Время: {break_time}\n"
         f"Дата: {get_current_date()}\n\n"
-        f"Подтверждаете?"
+        f"Подтверждаете запись?"
     )
     
     keyboard = [
         [
-            InlineKeyboardButton("✅ Да", callback_data=f"confirm_{break_time}"),
-            InlineKeyboardButton("❌ Нет", callback_data="back_to_breaks")
+            InlineKeyboardButton("✅ Да, записать", callback_data=f"confirm_{break_time}"),
+            InlineKeyboardButton("❌ Нет, отменить", callback_data="show_breaks")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -428,31 +429,33 @@ async def confirm_break_selection(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(text=text, reply_markup=reply_markup)
 
 async def process_break_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
-    """Сохранение записи"""
+    """Обработка записи на перерыв"""
     query = update.callback_query
     user_id = query.from_user.id
     current_date = get_current_date()
     
+    # Сохраняем запись
     success = save_break_to_db(user_id, break_time, current_date)
     
     if success:
         text = (
-            f"✅ Запись подтверждена!\n\n"
-            f"Время: {break_time}\n"
-            f"Дата: {current_date}"
+            f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n\n"
+            f"🕐 Время: {break_time}\n"
+            f"📅 Дата: {current_date}\n\n"
+            f"Вы успешно записаны на перерыв!"
         )
-        logger.info(f"✅ Запись: {user_id} на {break_time}")
+        logger.info(f"✅ Запись сохранена: user={user_id}, time={break_time}")
     else:
         text = (
-            f"⚠️ Вы уже записаны!\n\n"
-            f"Время: {break_time}\n"
-            f"Дата: {current_date}"
+            f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n\n"
+            f"Вы уже записаны на {break_time}\n"
+            f"Выберите другое время!"
         )
+        logger.info(f"⚠️ Запись уже существует: user={user_id}, time={break_time}")
     
     keyboard = [
-        [InlineKeyboardButton("📅 Еще запись", callback_data="show_breaks")],
-        [InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks")],
-        [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton("📝 ЕЩЁ ЗАПИСЬ", callback_data="show_breaks")],
+        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -467,16 +470,19 @@ async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_breaks = get_user_breaks(user_id, current_date)
     
     if user_breaks:
-        text = f"👤 Ваши записи ({current_date}):\n\n"
-        for i, bt in enumerate(user_breaks, 1):
-            text += f"{i}. 🕐 {bt}\n"
+        text = f"📋 МОИ ЗАПИСИ НА {current_date}\n\n"
+        for i, break_time in enumerate(user_breaks, 1):
+            text += f"{i}. 🕐 {break_time}\n"
     else:
-        text = f"👤 У вас нет записей на {current_date}"
+        text = (
+            f"📋 МОИ ЗАПИСИ\n\n"
+            f"❌ У вас нет записей на сегодня\n"
+            f"Запишитесь на перерыв!"
+        )
     
     keyboard = [
-        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
-        [InlineKeyboardButton("📋 Расписание", callback_data="today_schedule")],
-        [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks")],
+        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -490,29 +496,32 @@ async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def show_today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает расписание"""
+    """Показывает все бронирования"""
     query = update.callback_query
     current_date = get_current_date()
     
     all_breaks = get_all_breaks(current_date)
     
     if all_breaks:
-        text = f"📋 Расписание ({current_date}):\n\n"
-        for bt in get_break_times():
-            if bt in all_breaks:
-                users = ", ".join(all_breaks[bt][:3])
-                if len(all_breaks[bt]) > 3:
-                    users += f" и ещё {len(all_breaks[bt]) - 3}"
-                text += f"🕐 {bt}: {users}\n"
+        text = f"👥 ВСЕ БРОНИРОВАНИЯ НА {current_date}\n\n"
+        for break_time in get_break_times():
+            if break_time in all_breaks:
+                users = ", ".join(all_breaks[break_time][:3])
+                if len(all_breaks[break_time]) > 3:
+                    users += f" и ещё {len(all_breaks[break_time]) - 3}"
+                text += f"🕐 {break_time}: {users}\n"
             else:
-                text += f"🕐 {bt}: свободно\n"
+                text += f"🕐 {break_time}: свободно\n"
     else:
-        text = f"📋 На {current_date} записей нет"
+        text = (
+            f"👥 ВСЕ БРОНИРОВАНИЯ\n\n"
+            f"❌ На сегодня ещё нет записей\n"
+            f"Будьте первым!"
+        )
     
     keyboard = [
-        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
-        [InlineKeyboardButton("👤 Мои записи", callback_data="my_breaks")],
-        [InlineKeyboardButton("🔙 Меню", callback_data="back_to_menu")]
+        [InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks")],
+        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -525,94 +534,32 @@ async def show_today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=reply_markup
         )
 
-# ================== ТРОЙНАЯ ЗАЩИТА ОТ ОТКЛЮЧЕНИЯ ==================
-def start_auto_ping():
-    """
-    ⚡ ТРОЙНАЯ ЗАЩИТА: 3 независимых механизма пинга
-    ⏱️ Интервал: 5 минут (гарантия 100% активности)
-    🎯 Цель: Render НИКОГДА не отключит сервис
-    """
+async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику"""
+    query = update.callback_query
     
-    def ping_worker():
-        global ping_counter, ping_success, ping_failed
-        
-        # Ждем полного запуска сервера
-        logger.info("⏳ Авто-пинг: ожидание запуска (30 сек)...")
-        time.sleep(30)
-        
-        logger.info(f"🚀 ЗАПУСК ТРОЙНОЙ ЗАЩИТЫ")
-        logger.info(f"🎯 Основной URL: {RENDER_URL}")
-        logger.info(f"🔄 Резервные URL: {len(BACKUP_URLS)}")
-        logger.info(f"⏱️ Интервал: 5 минут")
-        
-        while True:
-            ping_counter += 1
-            ping_success_this_cycle = False
-            
-            # === УРОВЕНЬ 1: Основной пинг ===
-            try:
-                response = requests.get(
-                    f"{RENDER_URL}/health", 
-                    timeout=10,
-                    headers={"User-Agent": "Render-AutoPing/5.0"}
-                )
-                if response.status_code == 200:
-                    ping_success += 1
-                    ping_success_this_cycle = True
-                    logger.info(f"✅ [ОСНОВНОЙ] Пинг #{ping_counter} успешен")
-                else:
-                    logger.warning(f"⚠️ [ОСНОВНОЙ] Пинг #{ping_counter}: код {response.status_code}")
-            except Exception as e:
-                logger.error(f"❌ [ОСНОВНОЙ] Ошибка: {e}")
-            
-            # === УРОВЕНЬ 2: Резервные URL ===
-            for i, backup_url in enumerate(BACKUP_URLS, 1):
-                try:
-                    response = requests.get(backup_url, timeout=5)
-                    if response.status_code == 200:
-                        if not ping_success_this_cycle:
-                            ping_success += 1
-                            ping_success_this_cycle = True
-                        logger.info(f"✅ [РЕЗЕРВ-{i}] {backup_url.split('/')[-1]} успешен")
-                        break
-                except:
-                    continue
-            
-            # === УРОВЕНЬ 3: Экстренный пинг (если всё упало) ===
-            if not ping_success_this_cycle:
-                try:
-                    # Последняя попытка - прямой запрос корня
-                    response = requests.get(RENDER_URL, timeout=10)
-                    if response.status_code in [200, 404, 405]:  # Любой ответ - успех
-                        ping_success += 1
-                        ping_failed -= 1  # Корректируем статистику
-                        logger.info(f"✅ [ЭКСТРЕННЫЙ] Пинг #{ping_counter} успешен")
-                        ping_success_this_cycle = True
-                except:
-                    pass
-            
-            if not ping_success_this_cycle:
-                ping_failed += 1
-                logger.error(f"❌ ВСЕ УРОВНИ ЗАЩИТЫ: Пинг #{ping_counter} ПРОВАЛЕН")
-            
-            # Каждые 5 пингов - выводим статистику
-            if ping_counter % 5 == 0:
-                success_rate = (ping_success / ping_counter) * 100
-                logger.info(f"📊 СТАТИСТИКА: Всего={ping_counter}, ✅={ping_success}, ❌={ping_failed}, Успех={success_rate:.1f}%")
-            
-            # ⏱️ ИНТЕРВАЛ: 300 секунд = 5 минут (В 3 РАЗА ЧАЩЕ ЛИМИТА RENDER!)
-            # Render отключает через 15 минут бездействия → 5 минут гарантирует 100% активность
-            time.sleep(300)
+    stats = get_statistics()
     
-    global ping_counter, ping_success, ping_failed
-    ping_counter = 0
-    ping_success = 0
-    ping_failed = 0
+    text = (
+        f"📊 СТАТИСТИКА БОТА\n\n"
+        f"👥 Всего пользователей: {stats['total_users']}\n"
+        f"📝 Всего записей: {stats['total_breaks']}\n"
+        f"📅 Записей сегодня: {stats['today_breaks']}\n"
+        f"🕐 Активных сегодня: {stats['active_users']}\n\n"
+    )
     
-    thread = threading.Thread(target=ping_worker, daemon=True)
-    thread.start()
-    logger.info("✅ ТРОЙНАЯ ЗАЩИТА активирована (пинг каждые 5 минут)")
-    return thread
+    if stats['popular_times']:
+        text += "🔥 Популярное время:\n"
+        for i, (time, count) in enumerate(stats['popular_times'], 1):
+            text += f"{i}. {time} — {count} зап.\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("📝 ЗАПИСАТЬСЯ", callback_data="show_breaks")],
+        [InlineKeyboardButton("🔙 В МЕНЮ", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text=text, reply_markup=reply_markup)
 
 # ================== ЗАПУСК ТЕЛЕГРАМ БОТА ==================
 async def start_bot():
@@ -621,23 +568,33 @@ async def start_bot():
     
     logger.info("🤖 Инициализация Telegram бота...")
     
+    # Ждем стабилизации сети
     await asyncio.sleep(5)
     
     try:
+        # Создаем приложение
         bot_app = Application.builder().token(TOKEN).build()
+        logger.info("✅ Приложение создано")
         
-        # Добавляем ВСЕ обработчики
+        # Добавляем обработчики
         bot_app.add_handler(CommandHandler("start", start_command))
         bot_app.add_handler(CommandHandler("help", help_command))
         bot_app.add_handler(CommandHandler("debug", debug_command))
+        bot_app.add_handler(CommandHandler("breaks", breaks_command))
+        bot_app.add_handler(CommandHandler("my_breaks", my_breaks_command))
+        bot_app.add_handler(CommandHandler("today", today_command))
+        bot_app.add_handler(CommandHandler("stats", stats_command))
         bot_app.add_handler(CallbackQueryHandler(button_callback))
         
-        logger.info("✅ Обработчики добавлены")
+        logger.info("✅ Все обработчики добавлены")
         
+        # Инициализируем и запускаем
         await bot_app.initialize()
         await bot_app.start()
+        
+        # Начинаем polling
         await bot_app.updater.start_polling(
-            poll_interval=0.5,
+            poll_interval=1.0,
             timeout=20,
             drop_pending_updates=True
         )
@@ -646,35 +603,51 @@ async def start_bot():
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска бота: {e}")
+        logger.error(f"💥 Ошибка при запуске бота: {e}")
         return False
+
+# ================== АВТО-ПИНГ ==================
+def start_auto_ping():
+    """Запускает авто-пинг в отдельном потоке"""
+    def ping_worker():
+        # Ждем полного запуска
+        time.sleep(30)
+        
+        url = "https://ded1-8.onrender.com"
+        logger.info(f"🧵 Авто-пинг запущен для {url}")
+        
+        ping_count = 0
+        while True:
+            ping_count += 1
+            try:
+                response = requests.get(f"{url}/health", timeout=10)
+                if response.status_code == 200:
+                    logger.info(f"✅ Авто-пинг #{ping_count} успешен")
+                else:
+                    logger.warning(f"⚠️ Авто-пинг #{ping_count}: код {response.status_code}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка авто-пинга #{ping_count}: {e}")
+            
+            # Пинг каждые 8 минут
+            time.sleep(480)
+    
+    thread = threading.Thread(target=ping_worker, daemon=True)
+    thread.start()
+    logger.info("✅ Поток авто-пинга создан")
+    return thread
 
 # ================== FASTAPI ЭНДПОИНТЫ ==================
 @app.get("/")
 async def root():
     """Корневой эндпоинт"""
-    uptime = datetime.now(timezone.utc) - startup_time
-    success_rate = 0
-    if ping_counter > 0:
-        success_rate = (ping_success / ping_counter) * 100
-    
     return {
-        "message": "🤖 Telegram Bot - 24/7 STABLE",
-        "status": "✅ ONLINE",
+        "message": "Telegram Bot для записи на перерывы",
+        "status": "running",
         "bot": "active" if bot_app else "starting",
         "time_moscow": get_moscow_time(),
         "date": get_current_date(),
-        "uptime_hours": f"{uptime.total_seconds() / 3600:.1f}",
-        "ping_stats": {
-            "total": ping_counter,
-            "success": ping_success,
-            "failed": ping_failed,
-            "success_rate": f"{success_rate:.1f}%",
-            "interval_minutes": 5
-        },
-        "render_url": RENDER_URL,
-        "protection": "✅ АКТИВНА - Render НЕ отключит бота",
-        "version": "5.0 - 100% GARANTEE"
+        "uptime": str(datetime.now(timezone.utc) - startup_time),
+        "version": "4.0"
     }
 
 @app.get("/health")
@@ -682,92 +655,80 @@ async def health_check():
     """Health check для Render"""
     return {
         "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "bot_running": bool(bot_app),
-        "time_moscow": get_moscow_time(),
-        "date": get_current_date(),
-        "protection": "active"
+        "time_moscow": get_moscow_time()
     }
 
 @app.get("/status")
 async def status():
-    """Детальный статус"""
-    uptime = datetime.now(timezone.utc) - startup_time
-    success_rate = 0
-    if ping_counter > 0:
-        success_rate = (ping_success / ping_counter) * 100
-    
+    """Статус системы"""
     return {
         "server": {
-            "url": RENDER_URL,
-            "uptime": str(uptime).split('.')[0],
+            "uptime": str(datetime.now(timezone.utc) - startup_time),
             "port": PORT,
-            "startup": startup_time.isoformat()
+            "startup_time": startup_time.isoformat()
         },
         "bot": {
             "initialized": bool(bot_app),
             "database": "connected"
-        },
-        "protection": {
-            "status": "active",
-            "ping_count": ping_counter,
-            "success_rate": f"{success_rate:.1f}%",
-            "interval": "5 minutes",
-            "render_limit": "15 minutes",
-            "guarantee": "100% - Render will NEVER suspend"
         }
     }
 
 @app.get("/ping")
 async def ping():
     """Ручной пинг"""
-    return {
-        "ping": "pong",
-        "time": get_moscow_time(),
-        "protection": "active"
-    }
+    return {"ping": "pong", "time": get_moscow_time()}
 
 # ================== ЗАПУСК ПРИЛОЖЕНИЯ ==================
 @app.on_event("startup")
 async def startup_event():
-    """Запуск при старте"""
+    """Запуск при старте приложения"""
     logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК БОТА - ВЕРСИЯ 5.0")
-    logger.info("=" * 60)
-    logger.info(f"🎯 URL: {RENDER_URL}")
-    logger.info(f"🛡️ Защита: ТРОЙНАЯ (5 мин)")
+    logger.info("🚀 ЗАПУСК БОТА ДЛЯ ЗАПИСИ НА ПЕРЕРЫВЫ")
     logger.info("=" * 60)
     
+    # Инициализируем БД
     init_db()
-    logger.info(f"✅ Токен: Найден")
-    logger.info(f"⏰ Москва: {get_moscow_time()}")
     
-    # ЗАПУСКАЕМ ТРОЙНУЮ ЗАЩИТУ
+    logger.info(f"✅ Токен бота: Найден")
+    logger.info(f"⏰ Время по Москве: {get_moscow_time()}")
+    logger.info(f"📅 Дата: {get_current_date()}")
+    logger.info(f"🌐 Порт: {PORT}")
+    logger.info("=" * 60)
+    
+    # Запускаем авто-пинг
     start_auto_ping()
+    logger.info("🔧 Авто-пинг запущен (пинг каждые 8 минут)")
     
-    # ЗАПУСКАЕМ БОТА
+    # Запускаем бота
     success = await start_bot()
     
     if success:
-        logger.info("🎉 БОТ ГОТОВ К РАБОТЕ 24/7")
-        logger.info(f"🛡️ Render НЕ отключит бота никогда!")
+        logger.info("🎉 Все системы запущены и готовы к работе!")
     else:
-        logger.error("❌ Ошибка запуска!")
+        logger.error("💥 Не удалось запустить бота!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Остановка"""
+    """Остановка при завершении"""
     logger.info("🛑 Завершение работы...")
+    
     if bot_app:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
+        try:
+            await bot_app.updater.stop()
+            await bot_app.stop()
+            await bot_app.shutdown()
+            logger.info("✅ Telegram бот остановлен")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при остановке бота: {e}")
+    
     logger.info("👋 Сервер остановлен")
 
 # ================== ТОЧКА ВХОДА ==================
 def main():
-    """Основная функция"""
-    logger.info(f"🌍 Запуск на порту {PORT}")
-    logger.info(f"🛡️ Активация тройной защиты от Render")
+    """Основная функция запуска"""
+    logger.info(f"🌍 Запуск сервера на порту {PORT}...")
     
     uvicorn.run(
         app,
@@ -779,4 +740,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
