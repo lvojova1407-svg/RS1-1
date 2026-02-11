@@ -534,7 +534,7 @@ def start_auto_ping():
     """
     
     def ping_worker():
-        nonlocal ping_counter, ping_success, ping_failed
+        global ping_counter, ping_success, ping_failed
         
         # Ждем полного запуска сервера
         logger.info("⏳ Авто-пинг: ожидание запуска (30 сек)...")
@@ -779,3 +779,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
