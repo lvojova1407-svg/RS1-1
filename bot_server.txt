@@ -1,5 +1,5 @@
 """
-🤖 Telegram Bot для записи на перерывы - СТАТИЧНОЕ МЕНЮ
+🤖 Telegram Bot для записи на перерывы - INLINE КНОПКИ (UX/UI OPTIMIZED)
 🚀 10-минутные слоты, лимит 3 человека, никнеймы в расписании
 """
 import os
@@ -18,10 +18,11 @@ from fastapi import FastAPI
 import uvicorn
 
 # Telegram
-from telegram import Update, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, 
     CommandHandler, 
+    CallbackQueryHandler, 
     ContextTypes,
     MessageHandler,
     filters
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Telegram Bot для записи на перерывы",
     description="Бот для организации перерывов с 10-минутными слотами",
-    version="6.0"
+    version="7.1"
 )
 
 # Глобальные переменные
@@ -304,10 +305,11 @@ def get_statistics() -> Dict:
         "active_users": active_users
     }
 
-# ================== КОМАНДЫ БОТА ==================
+# ================== ОПТИМИЗИРОВАННЫЙ UX/UI ==================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
+    """🚀 ГЛАВНОЕ МЕНЮ — МИНИМАЛИЗМ"""
     user = update.effective_user
+    chat_id = update.effective_chat.id
     
     logger.info(f"🚀 /start от {user.id}")
     
@@ -318,299 +320,60 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_name=user.last_name
     )
     
+    # ✨ Текст стал короче в 3 раза — только суть
     welcome_text = (
-        f"👋 Привет, {user.first_name}!\n\n"
-        f"🤖 Бот для записи на перерывы\n"
-        f"📅 Сегодня: {get_current_date()}\n"
-        f"⏰ Время: {get_moscow_time()}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 Используйте меню внизу экрана:\n\n"
-        f"📝 /breaks - Записаться на перерыв\n"
-        f"📋 /mybreaks - Мои записи\n"
-        f"👥 /allbreaks - Расписание\n"
-        f"📊 /stats - Статистика\n"
-        f"❓ /help - Помощь\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"👋 {user.first_name}, записывайся на перерыв!\n\n"
+        f"⏱️ 10 мин · 👥 до 3 чел.\n"
+        f"📅 {get_current_date()} · ⏰ {get_moscow_time()}\n"
     )
     
-    await update.message.reply_text(welcome_text)
+    # 🎯 КНОПКИ: 2 строки вместо 4, визуально чище
+    keyboard = [
+        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
+        [
+            InlineKeyboardButton("📋 Мои", callback_data="my_breaks"),
+            InlineKeyboardButton("👥 Все", callback_data="today_schedule")
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=welcome_text,
+        reply_markup=reply_markup
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = (
-        f"🤖 ПОМОЩЬ ПО БОТУ\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📌 Доступные команды:\n\n"
-        f"🏠 /start - Главное меню\n"
-        f"📝 /breaks - Записаться на перерыв\n"
-        f"📋 /mybreaks - Мои записи\n"
-        f"👥 /allbreaks - Расписание\n"
-        f"📊 /stats - Статистика бота\n"
-        f"❓ /help - Эта справка\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ Таймслоты: 10 минут\n"
-        f"👥 Лимит: 3 человека на слот\n\n"
-        f"✅ Как записаться:\n"
-        f"1. Нажмите /breaks\n"
-        f"2. Выберите слот из списка\n"
-        f"3. Отправьте время начала (ЧЧ:ММ)\n\n"
-        f"📌 Пример: 14:30"
+        "🤖 Помощь по боту\n\n"
+        "Команды:\n"
+        "/start - Главное меню\n"
+        "/breaks - Записаться\n"
+        "/my_breaks - Мои записи\n"
+        "/today - Расписание\n"
+        "/stats - Статистика\n\n"
+        "⏱️ Слоты: 10 мин\n"
+        "👥 Лимит: 3 чел.\n"
     )
     
     await update.message.reply_text(help_text)
 
 async def breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для записи на перерыв с 10-минутными слотами"""
-    user_id = update.effective_user.id
-    current_date = get_current_date()
-    moscow_time = get_moscow_time()
-    user_breaks = get_user_breaks(user_id, current_date)
-    
-    # Получаем слоты на ближайшие 2 часа
-    nearby_slots = get_nearby_slots()
-    
-    text = (
-        f"🎯 ВЫБОР ВРЕМЕНИ ДЛЯ ПЕРЕРЫВА\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🕐 Текущее время (Москва): {moscow_time}\n"
-        f"📅 Дата: {current_date}\n"
-        f"⏳ Доступные слоты на ближайшие 2 часа\n\n"
-        f"📊 Статус слотов:\n"
-        f"🟢 - свободно\n"
-        f"🟡 - мало мест (1-2 чел.)\n"
-        f"🔴 - занят (3 чел.)\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🗓️ ВЫБЕРИТЕ УДОБНОЕ ВРЕМЯ:\n\n"
-    )
-    
-    # Разбиваем слоты на 2 колонки
-    for i in range(0, len(nearby_slots), 2):
-        if i + 1 < len(nearby_slots):
-            slot1 = nearby_slots[i]
-            slot2 = nearby_slots[i + 1]
-            
-            status1 = get_slot_status(slot1, current_date)
-            status2 = get_slot_status(slot2, current_date)
-            
-            slot1_start = slot1.split('-')[0]
-            slot2_start = slot2.split('-')[0]
-            
-            if slot1_start in user_breaks:
-                slot1_display = f"✅ {slot1} (вы)"
-            else:
-                slot1_display = f"{status1} {slot1}"
-                
-            if slot2_start in user_breaks:
-                slot2_display = f"✅ {slot2} (вы)"
-            else:
-                slot2_display = f"{status2} {slot2}"
-            
-            text += f"{slot1_display:<35} {slot2_display:<35}\n"
-        else:
-            slot1 = nearby_slots[i]
-            status1 = get_slot_status(slot1, current_date)
-            slot1_start = slot1.split('-')[0]
-            
-            if slot1_start in user_breaks:
-                slot1_display = f"✅ {slot1} (вы)"
-            else:
-                slot1_display = f"{status1} {slot1}"
-            
-            text += f"{slot1_display:<35}\n"
-        
-        text += "\n"
-    
-    text += (
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✏️ Чтобы записаться, отправьте время начала слота\n"
-        f"   в формате ЧЧ:ММ (например: 14:30)\n\n"
-        f"🔄 /breaks - Обновить слоты\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    )
-    
-    await update.message.reply_text(text)
+    """Обработчик команды /breaks"""
+    await show_breaks_menu(update, context)
 
-async def process_break_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений с временем"""
-    user_id = update.effective_user.id
-    message_text = update.message.text.strip()
-    current_date = get_current_date()
-    
-    time_pattern = r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
-    
-    if re.match(time_pattern, message_text):
-        if len(message_text) == 4:
-            message_text = f"0{message_text}"
-        
-        valid_times = [slot.split('-')[0] for slot in get_break_slots()]
-        
-        if message_text in valid_times:
-            success = save_break_to_db(user_id, message_text, current_date)
-            
-            if success:
-                full_slot = None
-                for slot in get_break_slots():
-                    if slot.startswith(message_text):
-                        full_slot = slot
-                        break
-                
-                conn = sqlite3.connect(DATABASE_URL)
-                cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT COUNT(*) FROM breaks 
-                    WHERE break_time = ? AND break_date = ?
-                ''', (message_text, current_date))
-                current_count = cursor.fetchone()[0]
-                conn.close()
-                
-                response = (
-                    f"✅ ЗАПИСЬ ПОДТВЕРЖДЕНА!\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"🕐 Слот: {full_slot or message_text}\n"
-                    f"📅 Дата: {current_date}\n"
-                    f"👥 Мест занято: {current_count}/3\n\n"
-                    f"Вы успешно записаны на перерыв!\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📋 /mybreaks - Мои записи\n"
-                    f"👥 /allbreaks - Расписание\n"
-                    f"🔄 /breaks - Обновить слоты"
-                )
-                logger.info(f"✅ Запись сохранена: user={user_id}, time={message_text}, count={current_count}/3")
-            else:
-                conn = sqlite3.connect(DATABASE_URL)
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                    SELECT COUNT(*) FROM breaks 
-                    WHERE user_id = ? AND break_date = ? AND break_time = ?
-                ''', (user_id, current_date, message_text))
-                already_registered = cursor.fetchone()[0] > 0
-                
-                cursor.execute('''
-                    SELECT COUNT(*) FROM breaks 
-                    WHERE break_time = ? AND break_date = ?
-                ''', (message_text, current_date))
-                slot_full = cursor.fetchone()[0] >= 3
-                
-                conn.close()
-                
-                if already_registered:
-                    response = (
-                        f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"❌ Вы уже записаны на этот слот!\n\n"
-                        f"📋 /mybreaks - Мои записи\n"
-                        f"🔄 /breaks - Выбрать другое время"
-                    )
-                elif slot_full:
-                    response = (
-                        f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"❌ Этот слот уже полностью занят (3/3)!\n\n"
-                        f"🔄 /breaks - Выбрать другое время"
-                    )
-                else:
-                    response = (
-                        f"⚠️ ЗАПИСЬ НЕ СОЗДАНА\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"❌ Не удалось создать запись\n\n"
-                        f"🔄 /breaks - Попробовать снова"
-                    )
-                
-                logger.info(f"⚠️ Запись не создана: user={user_id}, time={message_text}")
-            
-            await update.message.reply_text(response)
+async def my_breaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /my_breaks"""
+    await show_my_breaks(update, context)
 
-async def mybreaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает записи пользователя"""
-    user_id = update.effective_user.id
-    current_date = get_current_date()
-    
-    user_breaks = get_user_breaks(user_id, current_date)
-    
-    if user_breaks:
-        text = (
-            f"📋 МОИ ЗАПИСИ\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 Дата: {current_date}\n\n"
-        )
-        for i, break_time in enumerate(user_breaks, 1):
-            full_slot = break_time
-            for slot in get_break_slots():
-                if slot.startswith(break_time):
-                    full_slot = slot
-                    break
-            text += f"{i}. 🕐 {full_slot}\n"
-    else:
-        text = (
-            f"📋 МОИ ЗАПИСИ\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"❌ У вас нет записей на сегодня\n\n"
-            f"📝 /breaks - Записаться на перерыв"
-        )
-    
-    await update.message.reply_text(text)
-
-async def allbreaks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает расписание со всеми 10-минутными слотами и никнеймами"""
-    current_date = get_current_date()
-    all_breaks = get_all_breaks(current_date)
-    
-    # Получаем ВСЕ полные 10-минутные слоты
-    all_slots = get_break_slots()
-    
-    text = (
-        f"👥 РАСПИСАНИЕ ({current_date}):\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-    
-    # Показываем слоты с 10:00 до 18:50
-    for slot in all_slots:
-        break_time = slot.split('-')[0]
-        
-        if break_time in all_breaks:
-            names = ", ".join(all_breaks[break_time])
-            text += f"{slot}: {names}\n"
-        else:
-            text += f"{slot}: свободно\n"
-    
-    # Добавляем статистику
-    total_slots = len(all_slots)
-    booked_slots = len(all_breaks)
-    free_slots = total_slots - booked_slots
-    
-    text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📊 Статистика:\n"
-    text += f"🟢 Свободно: {free_slots} слотов\n"
-    text += f"📝 Занято: {booked_slots} слотов\n"
-    text += f"⏰ Всего: {total_slots} слотов\n"
-    
-    await update.message.reply_text(text)
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /today"""
+    await show_today_schedule(update, context)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает статистику"""
-    stats = get_statistics()
-    
-    text = (
-        f"📊 СТАТИСТИКА БОТА\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 Всего пользователей: {stats['total_users']}\n"
-        f"📝 Всего записей: {stats['total_breaks']}\n"
-        f"📅 Записей сегодня: {stats['today_breaks']}\n"
-        f"🕐 Активных сегодня: {stats['active_users']}\n\n"
-    )
-    
-    if stats['popular_times']:
-        text += "🔥 Популярное время:\n"
-        for i, (time, count) in enumerate(stats['popular_times'], 1):
-            full_slot = time
-            for slot in get_break_slots():
-                if slot.startswith(time):
-                    full_slot = slot
-                    break
-            text += f"{i}. {full_slot} — {count} зап.\n"
-    
-    await update.message.reply_text(text)
+    """Обработчик команды /stats"""
+    await show_statistics(update, context)
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /debug - проверка работы"""
@@ -627,37 +390,323 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(*) FROM breaks")
         break_count = cursor.fetchone()[0]
         conn.close()
-        db_info = f"Пользователей: {user_count}, Записей: {break_count}"
+        db_info = f"👥 {user_count} · 📝 {break_count}"
     except Exception as e:
         db_status = f"❌ Ошибка"
         db_info = str(e)[:100]
     
     response = (
-        f"🔧 ДИАГНОСТИКА\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🤖 Бот: ✅ Работает\n"
-        f"👤 Ваш ID: {user.id}\n"
-        f"🕐 Москва: {get_moscow_time()}\n"
-        f"📅 Дата: {get_current_date()}\n"
-        f"🗄️ База данных: {db_status}\n"
-        f"   {db_info}\n\n"
-        f"⏰ Таймслоты: 10 минут\n"
-        f"👥 Лимит: 3 человека\n"
-        f"🔄 Авто-пинг: каждые 8 минут\n"
-        f"📱 Меню: Статичные команды\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"🔧 Диагностика\n\n"
+        f"🤖 Бот: ✅\n"
+        f"🕐 {get_moscow_time()} · 📅 {get_current_date()}\n"
+        f"🗄️ БД: {db_status}\n"
+        f"   {db_info}\n"
+        f"⏱️ 10 мин · 👥 3 чел."
     )
     
     await update.message.reply_text(response)
+
+# ================== ОБРАБОТЧИКИ INLINE-КНОПОК ==================
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на inline-кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    
+    logger.info(f"🔘 Кнопка: {data} от {user_id}")
+    
+    if data == "show_breaks":
+        await show_breaks_menu(update, context)
+    elif data == "my_breaks":
+        await show_my_breaks(update, context)
+    elif data == "today_schedule":
+        await show_today_schedule(update, context)
+    elif data == "show_stats":
+        await show_statistics(update, context)
+    elif data.startswith("select_"):
+        break_time = data.replace("select_", "")
+        await confirm_break_selection(update, context, break_time)
+    elif data.startswith("confirm_"):
+        break_time = data.replace("confirm_", "")
+        await process_break_registration(update, context, break_time)
+    elif data == "back_to_menu":
+        await start_command(update, context)
+
+async def show_breaks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """⏳ ВЫБОР ВРЕМЕНИ — ЧИСТЫЙ ИНТЕРФЕЙС"""
+    query = update.callback_query
+    user_id = query.from_user.id if query else update.effective_user.id
+    
+    current_date = get_current_date()
+    user_breaks = get_user_breaks(user_id, current_date)
+    nearby_slots = get_nearby_slots()
+    
+    # 🎯 КЛАВИАТУРА: одна колонка, крупные кнопки
+    keyboard = []
+    
+    for slot in nearby_slots:
+        slot_start = slot.split('-')[0]
+        status = get_slot_status(slot, current_date)
+        
+        # Иконка статуса
+        if slot_start in user_breaks:
+            icon = "✅"
+        elif "🔴" in status:
+            icon = "🔴"
+        elif "🟡" in status:
+            icon = "🟡"
+        else:
+            icon = "🟢"
+        
+        # Только время, без статуса текстом
+        button_text = f"{icon} {slot}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"select_{slot_start}")])
+    
+    # Кнопка назад — всегда внизу
+    keyboard.append([InlineKeyboardButton("← Назад", callback_data="back_to_menu")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Минимальный текст — только легенда
+    text = (
+        f"⏳ Ближайшие 2 часа\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🟢 свободно · 🟡 1-2 чел · 🔴 занято\n"
+        f"✅ вы записаны\n"
+    )
+    
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=reply_markup
+        )
+
+async def confirm_break_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
+    """✅ ПОДТВЕРЖДЕНИЕ — ДВЕ БОЛЬШИЕ КНОПКИ"""
+    query = update.callback_query
+    
+    # Находим полный слот
+    full_slot = break_time
+    for slot in get_break_slots():
+        if slot.startswith(break_time):
+            full_slot = slot
+            break
+    
+    # Минимализм: только время и вопрос
+    text = f"✅ {full_slot}\n\nПодтвердить запись?"
+    
+    # Кнопки на одной строке
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Да", callback_data=f"confirm_{break_time}"),
+            InlineKeyboardButton("❌ Нет", callback_data="show_breaks")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text=text, reply_markup=reply_markup)
+
+async def process_break_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, break_time: str):
+    """🎉 УСПЕШНАЯ ЗАПИСЬ — МГНОВЕННАЯ РАДОСТЬ"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    current_date = get_current_date()
+    
+    success = save_break_to_db(user_id, break_time, current_date)
+    
+    # Находим полный слот
+    full_slot = break_time
+    for slot in get_break_slots():
+        if slot.startswith(break_time):
+            full_slot = slot
+            break
+    
+    if success:
+        # Получаем текущее количество записей
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM breaks 
+            WHERE break_time = ? AND break_date = ?
+        ''', (break_time, current_date))
+        current_count = cursor.fetchone()[0]
+        conn.close()
+        
+        # Эмоциональный, короткий ответ
+        text = (
+            f"✅ Ты записан на {full_slot}!\n"
+            f"👥 Мест: {current_count}/3\n"
+        )
+        logger.info(f"✅ Запись: {user_id} на {break_time} ({current_count}/3)")
+    else:
+        # Проверяем причину
+        conn = sqlite3.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM breaks 
+            WHERE user_id = ? AND break_date = ? AND break_time = ?
+        ''', (user_id, current_date, break_time))
+        already_registered = cursor.fetchone()[0] > 0
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM breaks 
+            WHERE break_time = ? AND break_date = ?
+        ''', (break_time, current_date))
+        slot_full = cursor.fetchone()[0] >= 3
+        
+        conn.close()
+        
+        if already_registered:
+            text = f"⚠️ Ты уже записан на {full_slot}"
+        elif slot_full:
+            text = f"🔴 Слот {full_slot} полностью занят"
+        else:
+            text = "❌ Ошибка, попробуй еще"
+        
+        logger.info(f"⚠️ Запись отклонена: {user_id} на {break_time}")
+    
+    # Действия после записи
+    keyboard = [
+        [InlineKeyboardButton("📅 Еще запись", callback_data="show_breaks")],
+        [InlineKeyboardButton("← В меню", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text=text, reply_markup=reply_markup)
+
+async def show_my_breaks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📋 МОИ ЗАПИСИ — МИНИМАЛИСТИЧНО"""
+    query = update.callback_query
+    user_id = query.from_user.id if query else update.effective_user.id
+    current_date = get_current_date()
+    
+    user_breaks = get_user_breaks(user_id, current_date)
+    
+    text = f"📋 Мои записи · {current_date}\n━━━━━━━━━━━━━━\n"
+    
+    if user_breaks:
+        for break_time in user_breaks:
+            for slot in get_break_slots():
+                if slot.startswith(break_time):
+                    text += f"✅ {slot}\n"
+                    break
+    else:
+        text += "😴 Нет записей"
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
+        [InlineKeyboardButton("← Назад", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=reply_markup
+        )
+
+async def show_today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """👥 РАСПИСАНИЕ — ТОЛЬКО ЗАНЯТЫЕ СЛОТЫ"""
+    query = update.callback_query
+    current_date = get_current_date()
+    
+    all_breaks = get_all_breaks(current_date)
+    
+    # Показываем только занятые слоты
+    text = f"👥 Занятые слоты · {current_date}\n━━━━━━━━━━━━━━\n"
+    
+    if not all_breaks:
+        text += "😴 Пока никто не записан\n"
+    else:
+        for break_time, names in sorted(all_breaks.items()):
+            # Ищем полный слот
+            full_slot = break_time
+            for slot in get_break_slots():
+                if slot.startswith(break_time):
+                    full_slot = slot
+                    break
+            text += f"• {full_slot} — {', '.join(names)}\n"
+    
+    # Краткая статистика
+    total_booked = len(all_breaks)
+    text += f"\n📊 Занято: {total_booked} слотов"
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
+        [InlineKeyboardButton("← Назад", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=reply_markup
+        )
+
+async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📊 СТАТИСТИКА — КОМПАКТНО"""
+    query = update.callback_query
+    
+    stats = get_statistics()
+    
+    # Получаем количество занятых слотов сегодня
+    current_date = get_current_date()
+    all_breaks = get_all_breaks(current_date)
+    booked_slots = len(all_breaks)
+    
+    text = (
+        f"📊 Статистика\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"👥 Всего: {stats['total_users']}\n"
+        f"📝 Записей: {stats['total_breaks']}\n\n"
+        f"📅 Сегодня:\n"
+        f"• Записей: {stats['today_breaks']}\n"
+        f"• Активных: {stats['active_users']}\n"
+        f"• Занято: {booked_slots} слотов\n"
+    )
+    
+    if stats['popular_times']:
+        text += f"\n🔥 Популярное:\n"
+        for i, (time, count) in enumerate(stats['popular_times'], 1):
+            for slot in get_break_slots():
+                if slot.startswith(time):
+                    text += f"• {slot} — {count} зап.\n"
+                    break
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Записаться", callback_data="show_breaks")],
+        [InlineKeyboardButton("← Назад", callback_data="back_to_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if query:
+        await query.edit_message_text(text=text, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=reply_markup
+        )
 
 # ================== ЗАПУСК ТЕЛЕГРАМ БОТА ==================
 async def setup_bot_commands(application: Application):
     """Установка команд для меню Telegram"""
     commands = [
         BotCommand("start", "🏠 Главное меню"),
-        BotCommand("breaks", "📝 Записаться на перерыв"),
-        BotCommand("mybreaks", "📋 Мои записи"),
-        BotCommand("allbreaks", "👥 Расписание"),
+        BotCommand("breaks", "📝 Записаться"),
+        BotCommand("my_breaks", "📋 Мои записи"),
+        BotCommand("today", "👥 Расписание"),
         BotCommand("stats", "📊 Статистика"),
         BotCommand("help", "❓ Помощь"),
         BotCommand("debug", "🔧 Диагностика"),
@@ -677,17 +726,20 @@ async def start_bot():
         bot_app = Application.builder().token(TOKEN).build()
         logger.info("✅ Приложение создано")
         
+        # Устанавливаем команды меню
         await setup_bot_commands(bot_app)
         
+        # Добавляем обработчики команд
         bot_app.add_handler(CommandHandler("start", start_command))
         bot_app.add_handler(CommandHandler("help", help_command))
         bot_app.add_handler(CommandHandler("debug", debug_command))
         bot_app.add_handler(CommandHandler("breaks", breaks_command))
-        bot_app.add_handler(CommandHandler("mybreaks", mybreaks_command))
-        bot_app.add_handler(CommandHandler("allbreaks", allbreaks_command))
+        bot_app.add_handler(CommandHandler("my_breaks", my_breaks_command))
+        bot_app.add_handler(CommandHandler("today", today_command))
         bot_app.add_handler(CommandHandler("stats", stats_command))
         
-        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_break_registration))
+        # Добавляем обработчик inline-кнопок
+        bot_app.add_handler(CallbackQueryHandler(button_callback))
         
         logger.info("✅ Все обработчики добавлены")
         
@@ -745,7 +797,7 @@ async def root():
         "time_moscow": get_moscow_time(),
         "date": get_current_date(),
         "uptime": str(datetime.now(timezone.utc) - startup_time),
-        "version": "6.0",
+        "version": "7.1",
         "slot_duration": "10 минут",
         "slot_limit": "3 человека"
     }
@@ -772,7 +824,7 @@ async def status():
         "bot": {
             "initialized": bool(bot_app),
             "database": "connected",
-            "menu_type": "static_commands",
+            "menu_type": "inline_buttons_optimized",
             "slot_duration": "10 минут",
             "slot_limit": "3 человека"
         }
@@ -788,7 +840,7 @@ async def ping():
 async def startup_event():
     """Запуск при старте приложения"""
     logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК БОТА ДЛЯ ЗАПИСИ НА ПЕРЕРЫВЫ")
+    logger.info("🚀 ЗАПУСК БОТА ДЛЯ ЗАПИСИ НА ПЕРЕРЫВЫ (UX/UI OPTIMIZED)")
     logger.info("=" * 60)
     
     init_db()
@@ -808,7 +860,7 @@ async def startup_event():
     
     if success:
         logger.info("🎉 Все системы запущены и готовы к работе!")
-        logger.info("📱 Режим: СТАТИЧНОЕ МЕНЮ | 10-МИНУТНЫЕ СЛОТЫ | ЛИМИТ 3 ЧЕЛОВЕКА")
+        logger.info("🎨 Режим: INLINE КНОПКИ | UX/UI ОПТИМИЗИРОВАН")
     else:
         logger.error("💥 Не удалось запустить бота!")
 
@@ -843,4 +895,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
