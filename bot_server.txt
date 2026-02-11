@@ -712,7 +712,7 @@ def start_auto_ping():
     """Запускает авто-пинг в отдельном потоке"""
     def ping_worker():
         time.sleep(30)
-        url = "https://ded1-8.onrender.com"
+        url = "https://rs1-1.onrender.com"
         logger.info(f"🧵 Авто-пинг запущен для {url}")
         
         ping_count = 0
@@ -843,3 +843,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
